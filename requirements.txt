@@ -1,0 +1,17 @@
+# Retra Dependencies
+
+# macOS APIs (window tracking, accessibility)
+pyobjc-core>=10.0
+pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-Quartz>=10.0
+pyobjc-framework-ApplicationServices>=10.0
+
+# Menubar app
+rumps>=0.4.0
+
+# Dashboard API
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# Utilities
+Pillow>=10.0.0    # image processing (optional, for screenshot manipulation)

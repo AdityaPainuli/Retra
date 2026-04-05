@@ -1,0 +1,37 @@
+# Retra Configuration
+# Copy this to settings.toml and customize
+
+[capture]
+poll_interval = 3              # seconds between window checks
+screenshot_interval = 180      # seconds between screenshots (3 min)
+idle_threshold = 300           # seconds before marking idle (5 min)
+screenshot_quality = 40        # JPEG quality (1-100, lower = smaller files)
+
+[privacy]
+blocked_apps = ["1Password", "Keychain Access"]
+blocked_url_patterns = ["bank", "chase.com"]
+blur_screenshots = false
+retention_days = 90
+
+[categories]
+coding = ["VS Code", "Code", "Xcode", "Terminal", "iTerm", "PyCharm", "Cursor", "Warp"]
+communication = ["Slack", "Discord", "Messages", "Zoom", "Teams", "Telegram"]
+browsing = ["Safari", "Chrome", "Firefox", "Arc", "Brave"]
+entertainment = ["Spotify", "Music", "VLC", "IINA"]
+writing = ["Obsidian", "Notion", "Bear", "Notes", "Craft"]
+learning = ["Anki", "Kindle", "Books"]
+
+[ai]
+provider = "claude"                      # "claude" or "ollama"
+claude_model = "claude-sonnet-4-20250514"
+# claude_api_key = "sk-..."             # or set ANTHROPIC_API_KEY env var
+ollama_model = "llama3.1:8b"
+ollama_url = "http://localhost:11434"
+
+[obsidian]
+vault_path = "~/Documents/Obsidian/MyVault"
+daily_notes_folder = "Retra"
+
+[dashboard]
+port = 5173
+auto_open = true
