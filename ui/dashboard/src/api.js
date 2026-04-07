@@ -76,4 +76,17 @@ export const api = {
     method: 'PUT',
     body: JSON.stringify(data),
   }),
+
+  // Wiki
+  getWikiIndex: () => request('/wiki/index'),
+  getWikiPage: (path) => request(`/wiki/page/${path}`),
+  getWikiCompileStatus: () => request('/wiki/compile-status'),
+  getWikiFocusTrends: () => request('/wiki/focus-trends'),
+  searchWiki: (q) => request(`/wiki/search?q=${encodeURIComponent(q)}`),
+  compileWiki: (date) => request(`/compile/${date}`, { method: 'POST' }),
+  compileWeek: () => request('/compile-week', { method: 'POST' }),
+  askWiki: (question) => request('/ask', {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  }),
 };

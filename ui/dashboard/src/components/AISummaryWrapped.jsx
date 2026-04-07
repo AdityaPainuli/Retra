@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronLeft, ChevronRight, Sparkles, Clock, Target, Flame, Zap, Trophy, Monitor, Pause, Play } from 'lucide-react';
 import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 /**
  * Spotify Wrapped–style immersive AI summary viewer.
@@ -448,7 +449,7 @@ function ReflectionSlide({ slide, accentColor }) {
         }}
       >
         <div className="text-[15px] leading-[1.75] text-white/80 [&_strong]:text-amber-400 [&_strong]:font-semibold [&_p]:mb-4 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-4 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-4 [&_li]:mb-1.5 pb-8">
-          <Markdown>{slide.text}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]}>{slide.text}</Markdown>
         </div>
       </motion.div>
     </div>

@@ -269,6 +269,201 @@ async def export_journal(date_str: str):
     return {"exported": True, "path": str(filepath)}
 
 
+# ── Wiki Compilation ──────────────────────────────────────────────
+
+@app.post("/api/compile/{date_str}")
+async def compile_wiki(date_str: str):
+    """Compile a daily note into the wiki."""
+    from export.wiki_compiler import compile_daily_note
+    try:
+        target = date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format.")
+
+    try:
+        compile_daily_note(target)
+        return {"compiled": True, "date": date_str}
+    except Exception as e:
+        raise HTTPException(500, f"Wiki compilation failed: {e}")
+
+
+@app.post("/api/compile-week")
+async def compile_week_endpoint():
+    """Generate a weekly rollup."""
+    from export.wiki_compiler import compile_week
+    try:
+        compile_week()
+        return {"compiled": True}
+    except Exception as e:
+        raise HTTPException(500, f"Weekly rollup failed: {e}")
+
+
+@app.post("/api/ask")
+async def ask_wiki(body: dict):
+    """Ask a question against the wiki."""
+    from export.wiki_compiler import query_wiki
+    question = body.get("question", "").strip()
+    if not question:
+        raise HTTPException(400, "No question provided.")
+
+    # Capture the printed output
+    import io
+    import contextlib
+    f = io.StringIO()
+    with contextlib.redirect_stdout(f):
+        query_wiki(question)
+    answer = f.getvalue().strip()
+
+    return {"answer": answer}
+
+
+@app.get("/api/wiki/compile-status")
+async def wiki_compile_status():
+    """Check wiki compilation status — which dates have been compiled."""
+    import re
+    settings = get_settings()
+    wiki_dir = settings.obsidian.resolved_vault_path / "retra-wiki"
+    log_path = wiki_dir / "log.md"
+
+    if not log_path.exists():
+        return {"initialized": False, "compiled_dates": [], "last_compiled": None}
+
+    log_content = log_path.read_text(encoding="utf-8")
+
+    # Extract dates from log entries like "## [2026-04-06] ingest | Daily note for 2026-04-06"
+    compiled_dates = re.findall(r'\[(\d{4}-\d{2}-\d{2})\] ingest', log_content)
+    today = date.today().isoformat()
+
+    return {
+        "initialized": True,
+        "compiled_dates": compiled_dates,
+        "last_compiled": compiled_dates[-1] if compiled_dates else None,
+        "today_compiled": today in compiled_dates,
+    }
+
+
+@app.get("/api/wiki/focus-trends")
+async def wiki_focus_trends():
+    """Parse focus-trends.md and return structured data for charting."""
+    import re
+    settings = get_settings()
+    wiki_dir = settings.obsidian.resolved_vault_path / "retra-wiki"
+    trends_path = wiki_dir / "patterns" / "focus-trends.md"
+
+    if not trends_path.exists():
+        return {"trends": []}
+
+    content = trends_path.read_text(encoding="utf-8")
+
+    # Parse markdown table rows: | 2026-04-06 | 14/100 | 1h 28m | 5h 26m | 18m |
+    trends = []
+    for match in re.finditer(
+        r'\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*(\d+)/100\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|',
+        content,
+    ):
+        date_str, score, deep_work, total, streak = match.groups()
+        trends.append({
+            "date": date_str,
+            "score": int(score),
+            "deep_work": deep_work.strip(),
+            "total_tracked": total.strip(),
+            "longest_streak": streak.strip(),
+        })
+
+    return {"trends": trends}
+
+
+@app.get("/api/wiki/search")
+async def wiki_search(q: str = Query(..., min_length=1)):
+    """Full-text search across all wiki pages."""
+    settings = get_settings()
+    wiki_dir = settings.obsidian.resolved_vault_path / "retra-wiki"
+
+    if not wiki_dir.exists():
+        return {"results": []}
+
+    query_lower = q.lower()
+    results = []
+
+    for subdir in ["projects", "patterns", "learning", "people", "rollups", "insights"]:
+        dir_path = wiki_dir / subdir
+        if not dir_path.exists():
+            continue
+        for f in dir_path.glob("*.md"):
+            content = f.read_text(encoding="utf-8")
+            if query_lower in content.lower():
+                # Extract matching lines for context
+                matches = []
+                for i, line in enumerate(content.split("\n")):
+                    if query_lower in line.lower():
+                        matches.append(line.strip())
+                        if len(matches) >= 3:
+                            break
+                results.append({
+                    "path": f"{subdir}/{f.name}",
+                    "title": f.stem.replace("-", " ").title(),
+                    "type": subdir.rstrip("s"),
+                    "matches": matches,
+                })
+
+    # Also search index and log
+    for fname in ["index.md", "log.md"]:
+        fp = wiki_dir / fname
+        if fp.exists() and query_lower in fp.read_text(encoding="utf-8").lower():
+            results.append({
+                "path": fname,
+                "title": fname.replace(".md", "").title(),
+                "type": "meta",
+                "matches": [],
+            })
+
+    return {"results": results, "query": q}
+
+
+@app.get("/api/wiki/page/{path:path}")
+async def wiki_get_page(path: str):
+    """Read a single wiki page by relative path."""
+    settings = get_settings()
+    wiki_dir = settings.obsidian.resolved_vault_path / "retra-wiki"
+    file_path = wiki_dir / path
+
+    # Prevent path traversal
+    try:
+        file_path.resolve().relative_to(wiki_dir.resolve())
+    except ValueError:
+        raise HTTPException(403, "Access denied.")
+
+    if not file_path.exists() or not file_path.suffix == ".md":
+        raise HTTPException(404, "Page not found.")
+
+    content = file_path.read_text(encoding="utf-8")
+    return {"path": path, "content": content}
+
+
+@app.get("/api/wiki/index")
+async def wiki_index():
+    """Return the wiki index with all pages and their metadata."""
+    settings = get_settings()
+    wiki_dir = settings.obsidian.resolved_vault_path / "retra-wiki"
+
+    if not wiki_dir.exists():
+        return {"initialized": False, "pages": []}
+
+    pages = []
+    for subdir in ["projects", "patterns", "learning", "people", "rollups", "insights"]:
+        dir_path = wiki_dir / subdir
+        if not dir_path.exists():
+            continue
+        for f in sorted(dir_path.glob("*.md")):
+            pages.append({
+                "path": f"{subdir}/{f.name}",
+                "title": f.stem.replace("-", " ").title(),
+                "type": subdir.rstrip("s"),
+            })
+
+    return {"initialized": True, "pages": pages}
+
+
 # ── Screenshots ───────────────────────────────────────────────────
 
 @app.get("/api/screenshot/{screenshot_id}")

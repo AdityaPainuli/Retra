@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from capture.window_tracker import get_active_window, is_screen_locked, ActiveWindow, get_browser_url_applescript, extract_domain
+from capture.window_tracker import get_active_window, is_screen_locked, is_incognito, ActiveWindow, get_browser_url_applescript, extract_domain
 from capture.screenshot import ScreenshotCapture
 from capture.idle_detector import is_user_idle
 from storage.database import Database
@@ -159,6 +159,10 @@ class CaptureDaemon:
         # Get active window — ONCE per cycle
         window = get_active_window()
         if not window:
+            return None
+
+        # Skip incognito/private browser windows entirely — no events, URLs, or screenshots
+        if is_incognito(window):
             return None
 
         # Check privacy blocklist

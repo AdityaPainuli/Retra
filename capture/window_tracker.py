@@ -140,6 +140,82 @@ def get_active_window() -> Optional[ActiveWindow]:
     return get_active_window_applescript()
 
 
+_BROWSERS = {"Safari", "Chrome", "Google Chrome", "Firefox", "Arc", "Brave Browser", "Microsoft Edge"}
+
+# Keywords browsers put in window titles for private/incognito mode
+_INCOGNITO_TITLE_HINTS = [
+    "(incognito)",      # Chrome
+    "(private)",        # Firefox
+    "private browsing", # Safari, Firefox
+    "(inprivate)",      # Edge
+]
+
+
+def is_incognito(window: ActiveWindow) -> bool:
+    """
+    Detect if a browser window is in incognito / private browsing mode.
+
+    Uses two strategies:
+    1. Window title keywords (works for all browsers, no extra AppleScript call)
+    2. AppleScript mode check for Chromium-based browsers (definitive answer)
+    """
+    if window.app_name not in _BROWSERS:
+        return False
+
+    # Strategy 1: check window title for incognito hints (fast, no subprocess)
+    title_lower = window.window_title.lower()
+    for hint in _INCOGNITO_TITLE_HINTS:
+        if hint in title_lower:
+            return True
+
+    # Strategy 2: AppleScript check for Chromium browsers
+    # Chrome/Brave/Arc/Edge expose "mode" on each window
+    chrome_based = {"Google Chrome", "Chrome", "Brave Browser", "Arc", "Microsoft Edge", "Chromium"}
+    if window.app_name in chrome_based:
+        try:
+            script = f'''
+            tell application "{window.app_name}"
+                if (count of windows) > 0 then
+                    return mode of front window
+                end if
+            end tell
+            '''
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                mode = result.stdout.strip().lower()
+                if "incognito" in mode:
+                    return True
+        except (subprocess.TimeoutExpired, Exception):
+            pass
+
+    # Strategy 2b: Safari private window check
+    if window.app_name == "Safari":
+        try:
+            script = '''
+            tell application "Safari"
+                if (count of windows) > 0 then
+                    return name of front document
+                end if
+            end tell
+            '''
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=2,
+            )
+            # Safari returns an error or empty for private windows with no document
+            if result.returncode != 0 or not result.stdout.strip():
+                # Likely a private window — also check title
+                if "private" in title_lower:
+                    return True
+        except (subprocess.TimeoutExpired, Exception):
+            pass
+
+    return False
+
+
 def _extract_url_from_title(app_name: str, title: str) -> Optional[str]:
     """
     Extract a URL from browser window titles.

@@ -45,6 +45,7 @@ class RetraMenubar(rumps.App):
             rumps.MenuItem("Today's Stats", callback=self.show_stats),
             rumps.MenuItem("Recording Health", callback=self.show_health),
             rumps.MenuItem("Generate Journal", callback=self.generate_journal),
+            rumps.MenuItem("Compile Wiki", callback=self.compile_wiki),
             None,
             rumps.MenuItem("Quit Retra", callback=self.quit_app),
         ]
@@ -121,6 +122,19 @@ class RetraMenubar(rumps.App):
             )
         except Exception as e:
             rumps.alert(title="Export Error", message=str(e))
+
+    @rumps.clicked("Compile Wiki")
+    def compile_wiki(self, _):
+        try:
+            from export.wiki_compiler import compile_daily_note
+            compile_daily_note()
+            rumps.notification(
+                title="Retra",
+                subtitle="Wiki compiled!",
+                message="Today's daily note compiled into wiki.",
+            )
+        except Exception as e:
+            rumps.alert(title="Compile Error", message=str(e))
 
     @rumps.clicked("Quit Retra")
     def quit_app(self, _):

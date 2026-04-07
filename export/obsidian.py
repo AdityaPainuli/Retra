@@ -432,4 +432,12 @@ def export_to_obsidian(target_date: Optional[date] = None):
             _generate_domain_note(domain, output_dir, short_date)
 
     print(f"[Retra] Journal exported to: {filepath}")
+
+    # Auto-compile into wiki
+    try:
+        from export.wiki_compiler import compile_daily_note
+        compile_daily_note(target_date)
+    except Exception as e:
+        print(f"[Retra] Wiki compile skipped: {e}")
+
     return filepath

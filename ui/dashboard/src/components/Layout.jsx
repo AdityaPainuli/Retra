@@ -9,6 +9,7 @@ import {
   ArrowLeftRight,
   Grid3x3,
   Globe,
+  BookOpen,
   Settings,
 } from 'lucide-react';
 import SettingsPanel from './SettingsPanel';
@@ -21,6 +22,7 @@ const NAV = [
   { to: '/insights', icon: TrendingUp, label: 'Insights' },
   { to: '/compare', icon: ArrowLeftRight, label: 'Compare' },
   { to: '/urls', icon: Globe, label: 'URLs' },
+  { to: '/wiki', icon: BookOpen, label: 'Wiki' },
 ];
 
 export default function Layout() {

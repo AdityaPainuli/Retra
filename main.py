@@ -12,6 +12,12 @@ Usage:
     python main.py menubar     Start the menubar app
     python main.py journal     Generate today's Obsidian journal
     python main.py journal YYYY-MM-DD  Generate journal for a specific date
+    python main.py compile     Compile today's daily note into wiki
+    python main.py compile YYYY-MM-DD  Compile a specific date into wiki
+    python main.py compile-week   Generate weekly rollup
+    python main.py lint        Health check the wiki
+    python main.py ask "question"  Query the wiki
+    python main.py backfill    Compile all existing daily notes into wiki
     python main.py install     Install as macOS Launch Agent (auto-start on login)
     python main.py uninstall   Remove Launch Agent
 """
@@ -175,6 +181,54 @@ def cmd_journal(target_date: str = None):
     print(f"Journal exported: {filepath}")
 
 
+def cmd_compile(target_date: str = None):
+    from export.wiki_compiler import compile_daily_note
+
+    if target_date:
+        d = date.fromisoformat(target_date)
+    else:
+        d = date.today()
+
+    compile_daily_note(d)
+
+
+def cmd_compile_week():
+    from export.wiki_compiler import compile_week
+    compile_week()
+
+
+def cmd_lint():
+    from export.wiki_compiler import lint_wiki
+    lint_wiki()
+
+
+def cmd_ask(question: str):
+    from export.wiki_compiler import query_wiki
+    query_wiki(question)
+
+
+def cmd_backfill():
+    """Compile all existing daily notes into the wiki."""
+    from export.wiki_compiler import compile_daily_note
+    settings = __import__("config.settings", fromlist=["get_settings"]).get_settings()
+    vault_path = settings.obsidian.resolved_vault_path
+    daylens_dir = vault_path / settings.obsidian.daily_notes_folder
+
+    notes = sorted(daylens_dir.glob("*.md"))
+    print(f"[Retra] Found {len(notes)} daily notes to backfill")
+
+    for note_path in notes:
+        date_str = note_path.stem
+        try:
+            d = date.fromisoformat(date_str)
+            print(f"  Compiling {date_str}...")
+            compile_daily_note(d)
+        except ValueError:
+            continue
+
+    print("[Retra] Backfill complete")
+
+
 def cmd_status():
     from capture.health import get_health
     from storage.database import Database
@@ -251,6 +305,41 @@ SERVICES = [
     ("com.retra.menubar",   "menubar",   "retra-menubar",   False),
 ]
 
+JOURNAL_LABEL = "com.retra.journal"
+
+
+def _make_scheduled_plist(label: str, command: str, hour: int, minute: int, log_name: str) -> str:
+    """Generate a launchd plist that runs a command daily at a specific time."""
+    python_path = sys.executable
+    script_path = Path(__file__).resolve()
+    home = Path.home()
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python_path}</string>
+        <string>{script_path}</string>
+        <string>{command}</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>{hour}</integer>
+        <key>Minute</key>
+        <integer>{minute}</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{home}/Library/Logs/{log_name}.log</string>
+    <key>StandardErrorPath</key>
+    <string>{home}/Library/Logs/{log_name}.error.log</string>
+</dict>
+</plist>"""
+
 
 def cmd_install():
     """Install all Retra services as macOS Launch Agents.
@@ -272,11 +361,22 @@ def cmd_install():
         os.system(f"launchctl load {plist_path}")
         print(f"  Installed {label}")
 
+    # Install scheduled journal + compile (daily at 23:00)
+    # journal already auto-triggers wiki compile, so one job handles both
+    journal_plist_path = plist_dir / f"{JOURNAL_LABEL}.plist"
+    os.system(f"launchctl unload {journal_plist_path} 2>/dev/null")
+    journal_plist_path.write_text(
+        _make_scheduled_plist(JOURNAL_LABEL, "journal", 23, 0, "retra-journal")
+    )
+    os.system(f"launchctl load {journal_plist_path}")
+    print(f"  Installed {JOURNAL_LABEL} (daily at 23:00)")
+
     print()
     print("Retra installed. All services will:")
     print("  - Start automatically on login")
     print("  - Resume after sleep/wake")
     print("  - Restart if they crash (capture + dashboard)")
+    print("  - Auto-export journal + compile wiki daily at 23:00")
     print()
     print(f"Logs: ~/Library/Logs/retra*.log")
     print("To remove: python main.py uninstall")
@@ -287,7 +387,8 @@ def cmd_uninstall():
     plist_dir = Path.home() / "Library" / "LaunchAgents"
     any_found = False
 
-    for label, _, _, _ in SERVICES:
+    all_labels = [label for label, _, _, _ in SERVICES] + [JOURNAL_LABEL]
+    for label in all_labels:
         plist_path = plist_dir / f"{label}.plist"
         if plist_path.exists():
             os.system(f"launchctl unload {plist_path}")
@@ -309,6 +410,11 @@ COMMANDS = {
     "dashboard": cmd_dashboard,
     "menubar": cmd_menubar,
     "journal": cmd_journal,
+    "compile": cmd_compile,
+    "compile-week": cmd_compile_week,
+    "lint": cmd_lint,
+    "ask": cmd_ask,
+    "backfill": cmd_backfill,
     "install": cmd_install,
     "uninstall": cmd_uninstall,
 }
@@ -326,9 +432,14 @@ def main():
         print(f"Available: {', '.join(COMMANDS.keys())}")
         sys.exit(1)
 
-    # Pass extra args to the command
-    if command == "journal" and len(sys.argv) > 2:
-        cmd_journal(sys.argv[2])
+    # Pass extra args to commands that accept them
+    if command in ("journal", "compile") and len(sys.argv) > 2:
+        COMMANDS[command](sys.argv[2])
+    elif command == "ask":
+        if len(sys.argv) < 3:
+            print("Usage: python main.py ask \"your question here\"")
+            sys.exit(1)
+        cmd_ask(" ".join(sys.argv[2:]))
     else:
         COMMANDS[command]()
 
