@@ -4,8 +4,6 @@ A local-first macOS app that passively captures your daily computer activity, in
 
 ![Retra Dashboard](assets/dashboard.png)
 
-> [Demo video](assets/demo.mp4)
-
 ## Why Retra?
 
 Ever wonder where your day went? Retra runs silently in the background and gives you an honest picture of how you spent your time — no manual tracking, no timers to start/stop. Just open the dashboard at end of day and see the truth.
@@ -26,8 +24,13 @@ Ever wonder where your day went? Retra runs silently in the background and gives
 - **URL Analytics** — Deep browsing analysis with productivity scoring, page-level tracking, and browsing flow visualization
 - **Menubar App** — Live recording indicator, focus time display, health monitoring
 - **Recording Health** — Know for sure your activity is being captured (heartbeat monitoring, status checks)
+- **LLM Wiki** — Compiles daily notes into a persistent knowledge base with project pages, pattern tracking, learning logs, and people
+- **Wiki Dashboard** — Browse, search, and query the wiki from the dashboard with full markdown rendering
+- **Ask Your Data** — Chat-style Q&A against your activity wiki powered by Claude
+- **Incognito Detection** — Automatically skips all recording for private/incognito browser windows
 - **Privacy Controls** — Blocklist for apps/URLs, all data stays on your machine
 - **Auto-Start** — Install as macOS Launch Agent, survives sleep/wake and reboots
+- **Automated Pipeline** — Scheduled daily journal export + wiki compilation at 23:00, auto weekly rollups on Sundays
 - **Storage Optimized** — ~15-20MB/day instead of ~65MB (downscaled screenshots, dedup, auto-cleanup)
 
 ## Dashboard Pages
@@ -41,26 +44,30 @@ Ever wonder where your day went? Retra runs silently in the background and gives
 | **Insights** | 30-day trends, category totals, app usage, period comparison                                   |
 | **Compare**  | Side-by-side comparison of any two days                                                        |
 | **URLs**     | Deep browsing analytics — productivity split, top pages, browsing flow, hourly breakdown       |
+| **Wiki**     | Browse/search the compiled wiki, ask questions, focus trend chart, compile status               |
 
 ![URL Analytics](assets/url.png)
 
 ## Architecture
 
 ```
-                         Retra
-  ┌─────────────────────────────────────────────┐
-  │                                             │
-  │  Capture Daemon ──> SQLite DB ──> FastAPI   │
-  │   - Window titles     (WAL mode)   Dashboard│
-  │   - URLs/domains                   (React)  │
-  │   - Screenshots                             │
-  │   - Idle detection   Summarizer ──> Obsidian│
-  │   - Heartbeat        (Claude/Ollama) Export │
-  │                                             │
-  │  Menubar App (rumps)                        │
-  │   - Live focus time                         │
-  │   - Recording health indicator              │
-  └─────────────────────────────────────────────┘
+                            Retra
+  ┌──────────────────────────────────────────────────┐
+  │                                                  │
+  │  Capture Daemon ──> SQLite DB ──> FastAPI        │
+  │   - Window titles     (WAL mode)   Dashboard     │
+  │   - URLs/domains                   (React)       │
+  │   - Screenshots                                  │
+  │   - Idle detection   Summarizer ──> Obsidian     │
+  │   - Incognito skip   (Claude/Ollama) Export      │
+  │   - Heartbeat                        │           │
+  │                                      ▼           │
+  │  Menubar App (rumps)          Wiki Compiler      │
+  │   - Live focus time            - Project pages   │
+  │   - Recording health           - Pattern tracking│
+  │   - Compile Wiki               - Weekly rollups  │
+  │                                - Ask / Query     │
+  └──────────────────────────────────────────────────┘
 ```
 
 ## Tech Stack
@@ -146,13 +153,19 @@ python main.py start
 | Command                             | Description                                             |
 | ----------------------------------- | ------------------------------------------------------- |
 | `python main.py start`              | Start capture daemon + dashboard + menubar (background) |
-| `python main.py stop`               | Stop all Retra processes                              |
+| `python main.py stop`               | Stop all Retra processes                                |
 | `python main.py status`             | Show recording health and today's stats                 |
 | `python main.py capture`            | Start capture daemon (foreground)                       |
 | `python main.py dashboard`          | Start web dashboard (foreground)                        |
 | `python main.py menubar`            | Start menubar app                                       |
 | `python main.py journal`            | Generate today's Obsidian journal                       |
 | `python main.py journal YYYY-MM-DD` | Generate journal for a specific date                    |
+| `python main.py compile`            | Compile today's daily note into wiki                    |
+| `python main.py compile YYYY-MM-DD` | Compile a specific date into wiki                       |
+| `python main.py compile-week`       | Generate weekly rollup                                  |
+| `python main.py lint`               | Health check the wiki                                   |
+| `python main.py ask "question"`     | Query the wiki with a question                          |
+| `python main.py backfill`           | Compile all existing daily notes into wiki              |
 | `python main.py install`            | Install as macOS Launch Agents (auto-start on login)    |
 | `python main.py uninstall`          | Remove Launch Agents                                    |
 
@@ -214,14 +227,15 @@ retra/
 │   ├── database.py             # SQLite schema, queries, persistent connections
 │   └── models.py               # Data models (WindowEvent, Session, DailySummary)
 ├── export/
-│   ├── obsidian.py             # Markdown journal generation
-│   └── summarizer.py           # AI summary (Claude/Ollama) + project detection
+│   ├── obsidian.py             # Markdown journal generation (auto-triggers wiki compile)
+│   ├── summarizer.py           # AI summary (Claude/Ollama) + project detection
+│   └── wiki_compiler.py        # LLM wiki compiler (ingest, rollup, lint, query)
 ├── ui/
-│   ├── server.py               # FastAPI server (20+ endpoints)
+│   ├── server.py               # FastAPI server (30+ endpoints)
 │   ├── menubar.py              # macOS menubar app with health indicator
 │   └── dashboard/              # React dashboard
 │       └── src/
-│           ├── pages/          # 7 pages (Today, Week, Heatmap, Replay, Insights, Compare, URLs)
+│           ├── pages/          # 8 pages (Today, Week, Heatmap, Replay, Insights, Compare, URLs, Wiki)
 │           ├── components/     # SessionCard, GoalsPanel, Toast, Layout
 │           ├── api.js          # API client
 │           └── hooks.js        # Date navigation, data fetching, utilities
@@ -271,10 +285,48 @@ When you click "AI Summary" or run `python main.py journal`, the summarizer:
 - Sends it to Claude API (or local Ollama) with a coaching-style prompt
 - Returns a 200-350 word reflection with highlights and actionable suggestions
 
+### LLM Wiki
+
+Retra's daily notes are standalone — Day 2 doesn't know about Day 1. The wiki layer fixes this by compiling daily exports into persistent, cross-referenced knowledge pages:
+
+```
+Obsidian Vault/
+├── Retra/                  ← Daily exports (raw, never modified)
+│   ├── 2026-04-01.md
+│   └── ...
+└── retra-wiki/             ← LLM-maintained wiki (compiled layer)
+    ├── CLAUDE.md           ← Schema that tells the LLM how to maintain the wiki
+    ├── index.md            ← Master index of all pages
+    ├── projects/           ← One page per project/workstream
+    ├── patterns/           ← Focus trends, distraction patterns, schedule analysis
+    ├── learning/           ← Topics being learned over time
+    ├── people/             ← Collaboration context
+    ├── rollups/            ← Weekly and monthly summaries
+    └── insights/           ← Saved answers to past queries
+```
+
+**How it works:**
+
+1. `python main.py journal` exports the daily note, then auto-triggers wiki compilation
+2. The wiki compiler sends the daily note + schema + existing wiki pages to Claude
+3. Claude updates project pages, pattern tracking, learning logs, and people pages
+4. On Sundays, a weekly rollup is auto-generated
+5. `python main.py install` schedules the full pipeline (journal + compile) daily at 23:00
+
+**Querying the wiki:**
+
+```bash
+python main.py ask "How much time did I spend on Pearson this week?"
+python main.py ask "What are my distraction patterns?"
+```
+
+Or use the **Wiki** page in the dashboard to browse, search, and ask questions interactively.
+
 ## Privacy
 
 - **100% local** — All data stored in SQLite on your machine
-- **No telemetry** — Nothing leaves your computer (unless you enable Claude API for summaries)
+- **No telemetry** — Nothing leaves your computer (unless you enable Claude API for summaries/wiki)
+- **Incognito safe** — Private/incognito browser windows are never recorded (no events, URLs, or screenshots)
 - **Blocklist** — Exclude sensitive apps and URLs from tracking
 - **`.env` for secrets** — API keys stored in `.env`, never committed
 - **Data retention** — Auto-deletes data older than 90 days (configurable)
@@ -292,13 +344,13 @@ When you click "AI Summary" or run `python main.py journal`, the summarizer:
 
 Contributions welcome! Some ideas:
 
-- [ ] Screenshot Replay player (filmstrip/video scrubber)
 - [ ] Distraction alerts (macOS notification after X min on entertainment)
 - [ ] Focus timer / Pomodoro integration
 - [ ] Meeting detection (Zoom/Meet/Teams auto-tagging)
-- [ ] Weekly report generation + Obsidian export
 - [ ] Calendar integration (Google Calendar overlay on timeline)
 - [ ] CSV/JSON data export
+- [ ] Monthly rollup command
+- [ ] Token budget optimization for wiki (send only relevant pages)
 - [ ] Linux support (replace macOS-specific APIs)
 
 ## License
