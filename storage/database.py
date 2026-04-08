@@ -413,42 +413,61 @@ class Database:
 
     def compute_daily_summary(self, target_date: date) -> DailySummary:
         """Compute a full daily summary from raw events."""
+        from config.settings import get_settings
+        productive_cats = get_settings().categories.PRODUCTIVE_CATEGORIES
+
         events = self.get_events_for_date(target_date)
         sessions = self.aggregate_sessions(target_date)
 
         summary = DailySummary(date=target_date)
 
         # Count category minutes from sessions
-        category_map = {
-            "coding": "focus_minutes",
+        # focus_minutes = sum of all productive categories (coding + writing + learning)
+        category_attr_map = {
             "communication": "communication_minutes",
             "browsing": "browsing_minutes",
             "entertainment": "entertainment_minutes",
-            "writing": "writing_minutes",
-            "learning": "learning_minutes",
             "idle": "idle_minutes",
             "other": "other_minutes",
         }
 
         for session in sessions:
             mins = session.duration_seconds // 60
-            attr = category_map.get(session.category, "other_minutes")
-            setattr(summary, attr, getattr(summary, attr) + mins)
+            if session.category in productive_cats:
+                # All productive categories contribute to focus_minutes
+                summary.focus_minutes += mins
+                # Also track the individual category for breakdown
+                if session.category == "writing":
+                    summary.writing_minutes += mins
+                elif session.category == "learning":
+                    summary.learning_minutes += mins
+                # coding gets tracked only in focus_minutes (no separate attr needed)
+            else:
+                attr = category_attr_map.get(session.category, "other_minutes")
+                setattr(summary, attr, getattr(summary, attr) + mins)
             summary.total_tracked_minutes += mins
 
-        # Count app switches
+        # Count context switches (only penalize switches between different categories,
+        # not between apps doing the same type of work)
         if events:
-            prev_app = events[0].app_name
+            prev_cat = events[0].category
             for e in events[1:]:
-                if e.app_name != prev_app and not e.is_idle:
-                    summary.app_switches += 1
-                    prev_app = e.app_name
+                if e.category != prev_cat and not e.is_idle:
+                    # Only count as a disruptive switch if moving between
+                    # productive and non-productive work (or entertainment)
+                    prev_productive = prev_cat in productive_cats
+                    curr_productive = e.category in productive_cats
+                    if prev_productive != curr_productive:
+                        summary.app_switches += 1
+                    prev_cat = e.category
 
-        # Longest focus streak
+        # Longest focus streak — consecutive productive sessions count together
         max_streak = 0
         current_streak = 0
         for session in sessions:
-            if session.category == "coding":
+            if session.category in productive_cats or session.category == "communication":
+                # Communication between productive sessions doesn't break the streak
+                # (e.g. quick Slack reply while coding)
                 current_streak += session.duration_seconds
                 max_streak = max(max_streak, current_streak)
             else:
@@ -458,9 +477,16 @@ class Database:
         # Focus score (weighted formula)
         if summary.active_minutes > 0:
             focus_ratio = summary.focus_minutes / summary.active_minutes
+            # Communication is "supportive" work — counts partially
+            comm_ratio = summary.communication_minutes / summary.active_minutes
+            productive_ratio = focus_ratio + (comm_ratio * 0.5)
+
             streak_bonus = min(summary.longest_focus_streak_minutes / 60, 1.0) * 15
-            switch_penalty = min(summary.app_switches / 100, 1.0) * 10
-            summary.focus_score = min(100, int(focus_ratio * 75 + streak_bonus - switch_penalty))
+            switch_penalty = min(summary.app_switches / 50, 1.0) * 10
+            entertainment_penalty = min(summary.entertainment_minutes / summary.active_minutes, 0.3) * 15
+            summary.focus_score = max(0, min(100, int(
+                productive_ratio * 75 + streak_bonus - switch_penalty - entertainment_penalty
+            )))
 
         summary.sessions = sessions
 

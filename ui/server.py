@@ -754,7 +754,8 @@ async def get_url_stats(date_str: str):
             prev_domain = domain
 
     # 6. Productivity split
-    productive_cats = {"coding", "learning", "writing"}
+    from config.settings import get_settings
+    productive_cats = get_settings().categories.PRODUCTIVE_CATEGORIES
     distraction_cats = {"entertainment"}
     neutral_cats = {"browsing", "communication", "other"}
     productive_secs = sum(s for c, s in cat_time.items() if c in productive_cats)

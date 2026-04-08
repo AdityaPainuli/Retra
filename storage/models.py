@@ -90,14 +90,19 @@ class DailySummary:
         h, m = divmod(self.total_tracked_minutes, 60)
         return f"{h}h {m}m"
 
+    @property
+    def coding_minutes(self) -> int:
+        """Coding-specific minutes (focus minus writing and learning)."""
+        return max(0, self.focus_minutes - self.writing_minutes - self.learning_minutes)
+
     def category_breakdown(self) -> list[dict]:
         return [
-            {"name": "Deep Work", "minutes": self.focus_minutes, "color": "#f59e0b"},
+            {"name": "Deep Work", "minutes": self.coding_minutes, "color": "#f59e0b"},
+            {"name": "Writing", "minutes": self.writing_minutes, "color": "#10b981"},
+            {"name": "Learning", "minutes": self.learning_minutes, "color": "#06b6d4"},
             {"name": "Communication", "minutes": self.communication_minutes, "color": "#3b82f6"},
             {"name": "Browsing", "minutes": self.browsing_minutes, "color": "#8b5cf6"},
             {"name": "Entertainment", "minutes": self.entertainment_minutes, "color": "#ef4444"},
-            {"name": "Writing", "minutes": self.writing_minutes, "color": "#10b981"},
-            {"name": "Learning", "minutes": self.learning_minutes, "color": "#06b6d4"},
             {"name": "Other", "minutes": self.other_minutes, "color": "#6b7280"},
         ]
 

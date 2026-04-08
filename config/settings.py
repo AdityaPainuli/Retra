@@ -87,12 +87,31 @@ class CategoryConfig:
         "pkg.go.dev": "coding", "docs.rs": "coding",
         "vercel.com": "coding", "netlify.com": "coding",
         "hub.docker.com": "coding", "bitbucket.org": "coding",
+        # AI Tools (productive work)
+        "claude.ai": "coding", "chat.openai.com": "coding",
+        "chatgpt.com": "coding", "gemini.google.com": "coding",
+        "copilot.microsoft.com": "coding", "perplexity.ai": "coding",
+        "anthropic.com": "coding", "openai.com": "learning",
+        "huggingface.co": "coding", "replicate.com": "coding",
+        # Professional / Outreach / Work tools
+        "linkedin.com": "communication", "angel.co": "communication",
+        "wellfound.com": "communication", "indeed.com": "communication",
+        "glassdoor.com": "communication", "lever.co": "communication",
+        "greenhouse.io": "communication", "workable.com": "communication",
+        # Project management & productivity
+        "linear.app": "coding", "jira.atlassian.com": "coding",
+        "trello.com": "coding", "asana.com": "coding",
+        "clickup.com": "coding", "monday.com": "coding",
+        "figma.com": "coding", "miro.com": "coding",
+        "whimsical.com": "coding", "excalidraw.com": "coding",
         # Learning
         "coursera.org": "learning", "udemy.com": "learning",
         "khanacademy.org": "learning", "edx.org": "learning",
         "arxiv.org": "learning", "scholar.google.com": "learning",
         "wikipedia.org": "learning", "en.wikipedia.org": "learning",
         "medium.com": "learning", "substack.com": "learning",
+        "dev.to": "learning", "hashnode.dev": "learning",
+        "leetcode.com": "learning", "hackerrank.com": "learning",
         # Communication
         "mail.google.com": "communication", "outlook.live.com": "communication",
         "slack.com": "communication", "discord.com": "communication",
@@ -100,7 +119,17 @@ class CategoryConfig:
         "calendar.google.com": "communication",
         # Writing
         "notion.so": "writing", "docs.google.com": "writing",
-        "obsidian.md": "writing",
+        "obsidian.md": "writing", "coda.io": "writing",
+        "airtable.com": "writing",
+        # Cloud / DevOps (productive)
+        "console.aws.amazon.com": "coding", "cloud.google.com": "coding",
+        "portal.azure.com": "coding", "dashboard.heroku.com": "coding",
+        "app.supabase.com": "coding", "firebase.google.com": "coding",
+    }
+
+    # Categories that count as productive/focus work
+    PRODUCTIVE_CATEGORIES: ClassVar[set[str]] = {
+        "coding", "writing", "learning",
     }
 
     def categorize_domain(self, domain: str) -> Optional[str]:
@@ -143,18 +172,34 @@ class CategoryConfig:
             ]
             learning_signals = [
                 "coursera", "udemy", "khan academy", "documentation",
-                "tutorial", "docs.", "arxiv", "paper"
+                "tutorial", "docs.", "arxiv", "paper", "lecture",
+                "lesson", "course", "leetcode", "hackerrank"
             ]
             coding_signals = [
                 "github", "gitlab", "stackoverflow", "stack overflow",
-                "npm", "pypi", "crates.io", "docs.python"
+                "npm", "pypi", "crates.io", "docs.python", "claude",
+                "chatgpt", "copilot", "pull request", "merge request",
+                "pipeline", "deploy", "build", "jira", "linear",
+                "figma", "supabase", "firebase", "vercel", "aws console"
+            ]
+            communication_signals = [
+                "linkedin", "gmail", "outlook", "email", "inbox",
+                "slack", "discord", "messages"
+            ]
+            writing_signals = [
+                "notion", "google docs", "obsidian", "coda",
+                "airtable", "confluence"
             ]
             if any(s in title_lower for s in entertainment_signals):
                 return "entertainment"
-            if any(s in title_lower for s in learning_signals):
-                return "learning"
             if any(s in title_lower for s in coding_signals):
                 return "coding"
+            if any(s in title_lower for s in writing_signals):
+                return "writing"
+            if any(s in title_lower for s in learning_signals):
+                return "learning"
+            if any(s in title_lower for s in communication_signals):
+                return "communication"
             return "browsing"
 
         # Direct app matching
