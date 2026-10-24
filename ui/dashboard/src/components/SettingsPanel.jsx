@@ -481,8 +481,11 @@ function GeneralTab({ settings, update }) {
       </Section>
 
       <Section title="Data Retention" description="How long to keep historical data before auto-cleanup.">
-        <Field label="Retention period (days)" hint="Events, sessions, and screenshots older than this are deleted on daemon startup.">
+        <Field label="Screenshot retention (days)" hint="Screenshots older than this are deleted. Cleanup runs daily.">
           <NumberInput value={settings.privacy?.retention_days} onChange={(v) => update('privacy', 'retention_days', v)} min={7} max={365} />
+        </Field>
+        <Field label="Activity retention (days)" hint="Window events, URLs, and sessions older than this are deleted. 0 keeps them forever.">
+          <NumberInput value={settings.privacy?.event_retention_days} onChange={(v) => update('privacy', 'event_retention_days', v)} min={0} max={3650} />
         </Field>
       </Section>
     </>
@@ -584,8 +587,8 @@ function AITab({ settings, update }) {
               value={settings.ai?.claude_model}
               onChange={(v) => update('ai', 'claude_model', v)}
               options={[
-                { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
-                { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (faster, cheaper)' },
+                { value: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+                { value: 'claude-haiku-5-5', label: 'Claude Haiku 5.5 (faster, cheaper)' },
               ]}
             />
           </Field>

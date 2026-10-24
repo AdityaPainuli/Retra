@@ -18,6 +18,23 @@ except ImportError:
 
 from storage.models import DailySummary, Session
 from config.settings import get_settings, DB_PATH
+from export import pipeline_status
+
+
+def _response_text(data: dict) -> Optional[str]:
+    """Join the text blocks of a Messages API response.
+
+    Current models think by default, so content[0] is usually a thinking
+    block, not text. Returns None on a refusal or a reply cut off by
+    max_tokens, so a truncated reflection is never saved as if complete.
+    """
+    stop = data.get("stop_reason")
+    if stop in ("refusal", "max_tokens"):
+        pipeline_status.note_error(f"Claude API: stop_reason={stop}")
+        print(f"[Retra] Claude response unusable (stop_reason={stop})")
+        return None
+    text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
+    return text or None
 
 
 REFLECTION_PROMPT = """You are a thoughtful productivity coach analyzing someone's full computer activity for the day.
@@ -258,6 +275,7 @@ def summarize_with_claude(summary: DailySummary) -> Optional[str]:
 
     if not api_key:
         print("[Retra] Warning: ANTHROPIC_API_KEY not set. Skipping AI summary.")
+        pipeline_status.note_error("ANTHROPIC_API_KEY not set")
         print("[Retra] Set it in .env file or config/settings.toml")
         return None
 
@@ -266,7 +284,9 @@ def summarize_with_claude(summary: DailySummary) -> Optional[str]:
 
     payload = json.dumps({
         "model": settings.ai.claude_model,
-        "max_tokens": 1024,
+        # Room for adaptive thinking plus the 200-350 word reflection.
+        "max_tokens": 8000,
+        "output_config": {"effort": "medium"},
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
 
@@ -284,12 +304,12 @@ def summarize_with_claude(summary: DailySummary) -> Optional[str]:
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30, context=_ssl_context) as resp:
+        with urllib.request.urlopen(req, timeout=180, context=_ssl_context) as resp:
             data = json.loads(resp.read().decode())
-            if data.get("content"):
-                return data["content"][0]["text"]
+            return _response_text(data)
     except Exception as e:
         print(f"[Retra] Claude API error: {e}")
+        pipeline_status.note_error(f"Claude API: {e}")
 
     return None
 
@@ -319,6 +339,7 @@ def summarize_with_ollama(summary: DailySummary) -> Optional[str]:
             return data.get("response")
     except Exception as e:
         print(f"[Retra] Ollama error: {e}")
+        pipeline_status.note_error(f"Ollama: {e}")
 
     return None
 
@@ -374,7 +395,8 @@ def _generate_narrative_with_claude(summary: DailySummary) -> Optional[list[dict
 
     payload = json.dumps({
         "model": settings.ai.claude_model,
-        "max_tokens": 2048,
+        "max_tokens": 8000,
+        "output_config": {"effort": "medium"},
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
     headers = {
@@ -388,11 +410,11 @@ def _generate_narrative_with_claude(summary: DailySummary) -> Optional[list[dict
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=45, context=_ssl_context) as resp:
+        with urllib.request.urlopen(req, timeout=180, context=_ssl_context) as resp:
             data = json.loads(resp.read().decode())
-            if not data.get("content"):
+            raw = _response_text(data)
+            if not raw:
                 return None
-            raw = data["content"][0]["text"].strip()
     except Exception as e:
         print(f"[Retra] Narrative Claude error: {e}")
         return None

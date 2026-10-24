@@ -794,11 +794,14 @@ class Database:
 
     # ── Cleanup ───────────────────────────────────────────────────
 
-    def cleanup_old_data(self, retention_days: int = 90):
-        """Delete data older than retention period."""
-        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+    def cleanup_old_data(self, event_retention_days: int = 0, screenshot_retention_days: int = 90):
+        """Delete data older than its retention period. 0 means keep forever."""
         with self._conn() as conn:
-            conn.execute("DELETE FROM window_events WHERE timestamp < ?", (cutoff,))
-            conn.execute("DELETE FROM sessions WHERE start_time < ?", (cutoff,))
-            conn.execute("DELETE FROM screenshots WHERE timestamp < ?", (cutoff,))
-            conn.execute("DELETE FROM url_events WHERE timestamp < ?", (cutoff,))
+            if screenshot_retention_days > 0:
+                cutoff = (datetime.now() - timedelta(days=screenshot_retention_days)).isoformat()
+                conn.execute("DELETE FROM screenshots WHERE timestamp < ?", (cutoff,))
+            if event_retention_days > 0:
+                cutoff = (datetime.now() - timedelta(days=event_retention_days)).isoformat()
+                conn.execute("DELETE FROM window_events WHERE timestamp < ?", (cutoff,))
+                conn.execute("DELETE FROM sessions WHERE start_time < ?", (cutoff,))
+                conn.execute("DELETE FROM url_events WHERE timestamp < ?", (cutoff,))

@@ -21,6 +21,7 @@ from storage.models import DailySummary, Session
 from storage.database import Database
 from export.summarizer import generate_summary, detect_projects
 from config.settings import get_settings, DB_PATH
+from export import pipeline_status
 
 
 # Category emoji map
@@ -75,7 +76,12 @@ def generate_daily_note(
             ai_text = generate_summary(summary)
             if ai_text:
                 summary.ai_summary = ai_text
-                db.save_daily_summary(summary)
+            pipeline_status.record("ai_summary", ok=bool(ai_text))
+
+    # Persist stats even when the AI call fails, so trends and rollups
+    # don't lose the day. compute_daily_summary already loaded any cached
+    # ai_summary, so this never wipes a previous reflection.
+    db.save_daily_summary(summary)
 
     projects = detect_projects(summary)
     domains = _extract_domains(summary.sessions)
@@ -458,6 +464,7 @@ def export_to_obsidian(
             _generate_domain_note(domain, output_dir, short_date)
 
     print(f"[Retra] Journal exported to: {filepath}")
+    pipeline_status.record("journal", ok=True)
 
     if compile_wiki:
         try:
@@ -465,5 +472,6 @@ def export_to_obsidian(
             compile_daily_note(target_date)
         except Exception as e:
             print(f"[Retra] Wiki compile skipped: {e}")
+            pipeline_status.record("wiki", ok=False, detail=str(e))
 
     return filepath
