@@ -25,6 +25,7 @@ day_project_totals turn that into per-project seconds.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 from storage.models import WindowEvent
@@ -43,7 +44,9 @@ def event_seconds(e: WindowEvent, nxt: Optional[WindowEvent]) -> int:
       - app switch, idle, long gap or end of data: at most HEARTBEAT_SEC
     """
     if nxt is None:
-        return HEARTBEAT_SEC
+        # Clip the tail at midnight so it never spills into the next date.
+        midnight = datetime.combine(e.timestamp.date() + timedelta(days=1), datetime.min.time())
+        return max(0, min(HEARTBEAT_SEC, int((midnight - e.timestamp).total_seconds())))
     gap = max(0, int((nxt.timestamp - e.timestamp).total_seconds()))
     if not nxt.is_idle and nxt.app_name == e.app_name and gap < SAME_APP_MERGE_SEC:
         return gap

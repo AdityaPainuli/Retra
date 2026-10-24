@@ -3,6 +3,7 @@ Retra Dashboard API
 FastAPI server that serves activity data to the React dashboard.
 """
 
+import asyncio
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -322,7 +323,8 @@ async def create_narrative(date_str: str):
     if summary.total_tracked_minutes < 15:
         raise HTTPException(400, "Not enough activity to narrate this day.")
 
-    beats = generate_narrative(summary)
+    # Blocking HTTP call (up to 180s); keep it off the event loop.
+    beats = await asyncio.to_thread(generate_narrative, summary)
     if not beats:
         raise HTTPException(500, "Narrative generation failed.")
 

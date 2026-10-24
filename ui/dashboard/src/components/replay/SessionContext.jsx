@@ -45,17 +45,22 @@ export default function SessionContext({ sessions, urlEvents, screenshot }) {
       if (start > t && !next) next = s;
     }
 
-    // URL-at-timestamp: nearest URL event within 60s before, else nearest forward within 60s
+    // URL-at-timestamp: latest URL event within 90s before, else the nearest
+    // forward one within 90s. Nearest-by-absolute-time could pick a page
+    // that hadn't been opened yet.
     let url = null;
     if (urlEvents?.length) {
-      let best = null;
-      let bestDist = Infinity;
+      let before = null;
+      let after = null;
       for (const u of urlEvents) {
         const ut = new Date(u.timestamp).getTime();
-        const dist = Math.abs(ut - t);
-        if (dist < bestDist && dist <= 90_000) { bestDist = dist; best = u; }
+        if (ut <= t && t - ut <= 90_000) {
+          if (!before || ut > new Date(before.timestamp).getTime()) before = u;
+        } else if (ut > t && ut - t <= 90_000) {
+          if (!after || ut < new Date(after.timestamp).getTime()) after = u;
+        }
       }
-      url = best;
+      url = before || after;
     }
 
     return { containing, prev, next, url };

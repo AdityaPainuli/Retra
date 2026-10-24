@@ -70,9 +70,9 @@ export default function Replay() {
     return allScreenshots;
   }, [allScreenshots, filter, screenshotCategory]);
 
-  // Clamp `current` if filter shrinks the list
+  // Clamp `current` if filter shrinks the list (or an empty list left it at -1)
   useEffect(() => {
-    if (current >= screenshots.length) setCurrent(Math.max(0, screenshots.length - 1));
+    if (current < 0 || current >= screenshots.length) setCurrent(Math.max(0, screenshots.length - 1));
   }, [screenshots.length, current]);
 
   // Auto-playback (restricted to filtered list)
@@ -107,7 +107,7 @@ export default function Replay() {
         setCurrent((p) => Math.max(0, p - 1));
         setPlaying(false);
       } else if (e.key === 'ArrowRight') {
-        setCurrent((p) => Math.min(screenshots.length - 1, p + 1));
+        setCurrent((p) => Math.max(0, Math.min(screenshots.length - 1, p + 1)));
         setPlaying(false);
       } else if (e.key === ' ') {
         e.preventDefault();
@@ -257,7 +257,7 @@ export default function Replay() {
               {playing ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
             </button>
             <button
-              onClick={() => { setCurrent((p) => Math.min(screenshots.length - 1, p + 1)); setPlaying(false); }}
+              onClick={() => { setCurrent((p) => Math.max(0, Math.min(screenshots.length - 1, p + 1))); setPlaying(false); }}
               className="p-2 rounded-lg hover:bg-[var(--color-surface-2)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
               title="Next (Right arrow)"
             >

@@ -104,6 +104,7 @@ export default function NarrativeTrack({ date, screenshot }) {
             </span>
           )}
         </div>
+        {error && <div className="text-xs text-red-400 mt-1">Regenerate failed: {error}</div>}
       </div>
       <button
         onClick={regenerate}

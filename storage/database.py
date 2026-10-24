@@ -334,8 +334,12 @@ class Database:
                     current.end_time = datetime.now()
             else:
                 # Historical day: attribute one heartbeat-interval past the
-                # last event as the implicit tail (same rule as switches).
-                _extend_to(current, current.end_time + timedelta(seconds=self.HEARTBEAT_INTERVAL))
+                # last event as the implicit tail (same rule as switches),
+                # clipped at midnight so it stays on the selected date.
+                day_end = datetime.combine(target_date + timedelta(days=1), datetime.min.time())
+                _extend_to(current, min(
+                    current.end_time + timedelta(seconds=self.HEARTBEAT_INTERVAL), day_end
+                ))
             current.duration_seconds = int(
                 (current.end_time - current.start_time).total_seconds()
             )
