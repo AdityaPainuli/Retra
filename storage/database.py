@@ -58,6 +58,7 @@ class Database:
                     bundle_id TEXT,
                     url TEXT,
                     is_idle INTEGER DEFAULT 0,
+                    project_hint TEXT,
                     created_at TEXT DEFAULT (datetime('now'))
                 );
 
@@ -139,13 +140,25 @@ class Database:
                     ON url_events(domain);
             """)
 
+            # Idempotent migration: add project_hint to old databases that
+            # were created before the column was part of the CREATE statement.
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(window_events)")}
+            if "project_hint" not in cols:
+                conn.execute("ALTER TABLE window_events ADD COLUMN project_hint TEXT")
+            # Index for fast project-hint lookups
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_project_hint "
+                "ON window_events(project_hint)"
+            )
+
     # ── Window Events ─────────────────────────────────────────────
 
     def insert_event(self, event: WindowEvent) -> int:
         conn = self._get_persistent_conn()
         cursor = conn.execute("""
-            INSERT INTO window_events (timestamp, app_name, window_title, category, bundle_id, url, is_idle)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO window_events
+                (timestamp, app_name, window_title, category, bundle_id, url, is_idle, project_hint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event.timestamp.isoformat(),
             event.app_name,
@@ -154,6 +167,7 @@ class Database:
             event.bundle_id,
             event.url,
             int(event.is_idle),
+            event.project_hint,
         ))
         conn.commit()
         return cursor.lastrowid
@@ -176,6 +190,9 @@ class Database:
                 bundle_id=r["bundle_id"],
                 url=r["url"],
                 is_idle=bool(r["is_idle"]),
+                # Old rows may not have this column populated; row access by
+                # name returns None if the column was added by migration.
+                project_hint=(r["project_hint"] if "project_hint" in r.keys() else None),
             )
             for r in rows
         ]
@@ -192,17 +209,40 @@ class Database:
 
     # ── Sessions ──────────────────────────────────────────────────
 
+    # Daemon's same-window heartbeat interval. Sessions can attribute time
+    # up to this much past the last captured event before requiring a fresh
+    # confirmation. Keep in sync with capture/daemon.py:_capture_cycle.
+    HEARTBEAT_INTERVAL = 60
+
     def aggregate_sessions(self, target_date: date, merge_threshold: int = 300) -> list[Session]:
         """
         Build sessions from raw window events.
         Events in the same app within `merge_threshold` seconds (default 5 min) get merged.
         For browsers, tracks unique domains visited within the session.
+
+        Time accounting model:
+          - Each event marks "the user was on this app at this timestamp."
+          - When a session ends (different app appears, idle event, or end of
+            day), its end_time is extended toward the next event boundary —
+            capped at HEARTBEAT_INTERVAL beyond the last confirmed activity.
+            This recovers the 0–60s leak between the last heartbeat in App A
+            and the first event of App B without claiming attribution we
+            never sampled.
         """
         events = self.get_events_for_date(target_date)
         if not events:
             return []
 
         import re
+
+        def _extend_to(session: "Session", boundary: datetime) -> None:
+            """Push session.end_time toward `boundary`, capped at HEARTBEAT_INTERVAL
+            beyond the current end_time. Recovers the per-switch leak."""
+            gap = (boundary - session.end_time).total_seconds()
+            if gap <= 0:
+                return
+            extension = min(gap, self.HEARTBEAT_INTERVAL)
+            session.end_time = session.end_time + timedelta(seconds=int(extension))
 
         def _extract_domain(title: str, url: str = "") -> Optional[str]:
             """Extract domain from URL field or [domain] tag in title."""
@@ -228,7 +268,7 @@ class Database:
         for event in events:
             if event.is_idle:
                 if current:
-                    current.end_time = event.timestamp
+                    _extend_to(current, event.timestamp)
                     current.duration_seconds = int(
                         (current.end_time - current.start_time).total_seconds()
                     )
@@ -267,7 +307,11 @@ class Database:
                 if domain and domain not in current.domains:
                     current.domains.append(domain)
             else:
-                # Finish current session, start new one
+                # Finish current session, start new one.
+                # Bug-1 fix: extend end_time toward this new event's
+                # timestamp (capped at HEARTBEAT_INTERVAL) so the trailing
+                # 0–60s before the switch get attributed to the prior app.
+                _extend_to(current, event.timestamp)
                 current.duration_seconds = int(
                     (current.end_time - current.start_time).total_seconds()
                 )
@@ -288,6 +332,10 @@ class Database:
                 age = (datetime.now() - current.end_time).total_seconds()
                 if age < 300:
                     current.end_time = datetime.now()
+            else:
+                # Historical day: attribute one heartbeat-interval past the
+                # last event as the implicit tail (same rule as switches).
+                _extend_to(current, current.end_time + timedelta(seconds=self.HEARTBEAT_INTERVAL))
             current.duration_seconds = int(
                 (current.end_time - current.start_time).total_seconds()
             )
@@ -328,8 +376,11 @@ class Database:
             else:
                 merged.append(s)
 
-        # Drop idle sessions and tiny sessions from the result
-        return [s for s in merged if s.duration_seconds >= 60 and s.category != "idle"]
+        # Drop idle sessions; keep all real activity, however brief.
+        # Bug-2 fix: the prior `>= 60` filter discarded thousands of valid
+        # micro-sessions per day (~40 min total). Honest accounting wins;
+        # the UI can choose to collapse small sessions for display.
+        return [s for s in merged if s.duration_seconds > 0 and s.category != "idle"]
 
     def save_sessions(self, sessions: list[Session]):
         with self._conn() as conn:
@@ -421,71 +472,131 @@ class Database:
 
         summary = DailySummary(date=target_date)
 
-        # Count category minutes from sessions
-        # focus_minutes = sum of all productive categories (coding + writing + learning)
-        category_attr_map = {
-            "communication": "communication_minutes",
-            "browsing": "browsing_minutes",
-            "entertainment": "entertainment_minutes",
-            "idle": "idle_minutes",
-            "other": "other_minutes",
+        # Count category minutes from sessions.
+        # Bug-4 fix: sum seconds first, divide to minutes once at the end.
+        # The prior code did `session.duration_seconds // 60` per session,
+        # truncating fractional minutes on every one of N sessions. On busy
+        # days (300+ sessions) this silently dropped ~2h of real activity.
+        secs = {
+            "focus": 0,
+            "writing": 0,
+            "learning": 0,
+            "communication": 0,
+            "browsing": 0,
+            "entertainment": 0,
+            "idle": 0,
+            "other": 0,
+            "total": 0,
+        }
+        category_to_bucket = {
+            "communication": "communication",
+            "browsing": "browsing",
+            "entertainment": "entertainment",
+            "idle": "idle",
         }
 
         for session in sessions:
-            mins = session.duration_seconds // 60
+            s = session.duration_seconds
             if session.category in productive_cats:
-                # All productive categories contribute to focus_minutes
-                summary.focus_minutes += mins
-                # Also track the individual category for breakdown
+                secs["focus"] += s
                 if session.category == "writing":
-                    summary.writing_minutes += mins
+                    secs["writing"] += s
                 elif session.category == "learning":
-                    summary.learning_minutes += mins
-                # coding gets tracked only in focus_minutes (no separate attr needed)
+                    secs["learning"] += s
             else:
-                attr = category_attr_map.get(session.category, "other_minutes")
-                setattr(summary, attr, getattr(summary, attr) + mins)
-            summary.total_tracked_minutes += mins
+                bucket = category_to_bucket.get(session.category, "other")
+                secs[bucket] += s
+            secs["total"] += s
 
-        # Count context switches (only penalize switches between different categories,
-        # not between apps doing the same type of work)
-        if events:
-            prev_cat = events[0].category
-            for e in events[1:]:
-                if e.category != prev_cat and not e.is_idle:
-                    # Only count as a disruptive switch if moving between
-                    # productive and non-productive work (or entertainment)
-                    prev_productive = prev_cat in productive_cats
-                    curr_productive = e.category in productive_cats
-                    if prev_productive != curr_productive:
-                        summary.app_switches += 1
-                    prev_cat = e.category
+        summary.focus_minutes = secs["focus"] // 60
+        summary.writing_minutes = secs["writing"] // 60
+        summary.learning_minutes = secs["learning"] // 60
+        summary.communication_minutes = secs["communication"] // 60
+        summary.browsing_minutes = secs["browsing"] // 60
+        summary.entertainment_minutes = secs["entertainment"] // 60
+        summary.other_minutes = secs["other"] // 60
+        summary.total_tracked_minutes = secs["total"] // 60
 
-        # Longest focus streak — consecutive productive sessions count together
+        # Fix B: populate idle_minutes from raw events.
+        # aggregate_sessions filters idle out before returning, so the
+        # per-session sum above can't see it. Walk the raw events instead:
+        # each contiguous run of is_idle events represents one idle stretch,
+        # capped at IDLE_CAP to avoid counting sleep / overnight.
+        IDLE_CAP = 600  # match aggregate_sessions' idle_cap
+        idle_seconds = 0
+        idle_start: Optional[datetime] = None
+        for e in events:
+            if e.is_idle:
+                if idle_start is None:
+                    idle_start = e.timestamp
+            elif idle_start is not None:
+                gap = int((e.timestamp - idle_start).total_seconds())
+                idle_seconds += min(gap, IDLE_CAP)
+                idle_start = None
+        if idle_start is not None:
+            # Trailing idle (no closing active event): count one cap-worth.
+            idle_seconds += IDLE_CAP
+        summary.idle_minutes = idle_seconds // 60
+
+        # Fix E: app_switches = count of distinct non-idle activity blocks.
+        # The old "productive↔non-productive flip" definition hid heavy
+        # within-category switching (e.g. flipping between three projects
+        # all in iTerm2 registered as zero switches). Session count is a
+        # better felt-context-switching proxy until project attribution
+        # lands. `sessions` is already idle-filtered by aggregate_sessions.
+        summary.app_switches = len(sessions)
+
+        # Fix D: longest focus streak — break on long communication breaks
+        # AND idle gaps between sessions. The prior code happily merged a
+        # 30-min coding block, a 2-hour idle stretch, and another 30-min
+        # coding block into a "60-min streak" because idle was invisible
+        # at this layer.
+        STREAK_IDLE_BREAK_SECONDS = 300        # 5 min idle gap breaks streak
+        STREAK_COMM_BREAK_SECONDS = 300        # 5 min Slack breaks streak
         max_streak = 0
         current_streak = 0
+        prev_end: Optional[datetime] = None
         for session in sessions:
-            if session.category in productive_cats or session.category == "communication":
-                # Communication between productive sessions doesn't break the streak
-                # (e.g. quick Slack reply while coding)
+            inter_gap = (
+                int((session.start_time - prev_end).total_seconds())
+                if prev_end is not None else 0
+            )
+            if inter_gap > STREAK_IDLE_BREAK_SECONDS:
+                current_streak = 0
+            if session.category in productive_cats:
                 current_streak += session.duration_seconds
                 max_streak = max(max_streak, current_streak)
+            elif (
+                session.category == "communication"
+                and session.duration_seconds <= STREAK_COMM_BREAK_SECONDS
+            ):
+                # Brief Slack reply while coding — keep the streak alive,
+                # but DON'T add the comm time to the focus measurement.
+                pass
             else:
                 current_streak = 0
+            prev_end = session.end_time
         summary.longest_focus_streak_minutes = max_streak // 60
 
-        # Focus score (weighted formula)
+        # Fix C: focus score — widen the practical scale.
+        #   - productive_ratio weight 75 → 80 (more reward for productive %)
+        #   - streak_bonus saturates at 2h → +20 max (was 1h → +15 max)
+        #   - switch_penalty divisor 50 → 100 (calibrated to new app_switches
+        #     definition, which is session-count not category-flip-count)
+        #   - entertainment_penalty unchanged
+        # Practical max ~100 for a great day, vs ~80 before.
         if summary.active_minutes > 0:
             focus_ratio = summary.focus_minutes / summary.active_minutes
-            # Communication is "supportive" work — counts partially
             comm_ratio = summary.communication_minutes / summary.active_minutes
             productive_ratio = focus_ratio + (comm_ratio * 0.5)
 
-            streak_bonus = min(summary.longest_focus_streak_minutes / 60, 1.0) * 15
-            switch_penalty = min(summary.app_switches / 50, 1.0) * 10
-            entertainment_penalty = min(summary.entertainment_minutes / summary.active_minutes, 0.3) * 15
+            streak_bonus = min(summary.longest_focus_streak_minutes / 120, 1.0) * 20
+            switch_penalty = min(summary.app_switches / 100, 1.0) * 10
+            entertainment_penalty = min(
+                summary.entertainment_minutes / summary.active_minutes, 0.3
+            ) * 15
             summary.focus_score = max(0, min(100, int(
-                productive_ratio * 75 + streak_bonus - switch_penalty - entertainment_penalty
+                productive_ratio * 80 + streak_bonus - switch_penalty - entertainment_penalty
             )))
 
         summary.sessions = sessions

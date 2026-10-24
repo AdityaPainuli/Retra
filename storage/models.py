@@ -17,6 +17,11 @@ class WindowEvent:
     bundle_id: Optional[str] = None
     url: Optional[str] = None
     is_idle: bool = False
+    # Best-effort project signal captured at event time — e.g. "retra" from a
+    # terminal cwd, "owner/repo" from a github tab, or None when ambiguous.
+    # The attribution pass uses these as anchor points; unanchored events
+    # inherit from the nearest anchor within a context window.
+    project_hint: Optional[str] = None
     id: Optional[int] = None
 
 

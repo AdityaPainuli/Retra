@@ -9,7 +9,6 @@ import {
   Gauge,
   FileText,
   Sparkles,
-  FolderGit2,
 } from 'lucide-react';
 import {
   PieChart,
@@ -38,6 +37,7 @@ import { useToast } from '../components/Toast';
 import { AnimatePresence } from 'framer-motion';
 import Markdown from 'react-markdown';
 import SessionCard from '../components/SessionCard';
+import ProjectsCard from '../components/ProjectsCard';
 import GoalsPanel from '../components/GoalsPanel';
 import AISummaryWrapped from '../components/AISummaryWrapped';
 
@@ -261,29 +261,12 @@ export default function Dashboard() {
         </section>
       </div>
 
-      {/* Detected Projects */}
-      {summary.projects?.length > 0 && (
-        <section className="bg-[var(--color-surface)] rounded-xl p-4 border border-[var(--color-border)]">
-          <h2 className="text-sm font-medium text-[var(--color-text-muted)] mb-3 flex items-center gap-2">
-            <FolderGit2 className="w-4 h-4 text-[var(--color-amber)]" />
-            Projects Detected
-          </h2>
-          <div className="flex flex-wrap gap-2">
-            {summary.projects.map((p) => (
-              <div
-                key={p.name}
-                className="flex items-center gap-2 bg-[var(--color-surface-2)] px-3 py-2 rounded-lg border border-[var(--color-border)]"
-              >
-                <span className="text-sm font-medium">{p.name}</span>
-                <span className="text-xs text-[var(--color-text-muted)]">
-                  {p.minutes >= 60
-                    ? `${Math.floor(p.minutes / 60)}h ${p.minutes % 60}m`
-                    : `${p.minutes}m`}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
+      {/* Projects — attribution breakdown */}
+      {(summary.projects?.length > 0 || summary.unattributed_minutes > 0) && (
+        <ProjectsCard
+          projects={summary.projects || []}
+          unattributedMinutes={summary.unattributed_minutes || 0}
+        />
       )}
 
       {/* Daily Goals */}

@@ -13,7 +13,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from capture.window_tracker import get_active_window, is_screen_locked, is_incognito, ActiveWindow, get_browser_url_applescript, extract_domain
+from capture.window_tracker import (
+    get_active_window,
+    is_screen_locked,
+    is_incognito,
+    ActiveWindow,
+    get_browser_url_applescript,
+    extract_domain,
+    get_project_hint,
+)
 from capture.screenshot import ScreenshotCapture
 from capture.idle_detector import is_user_idle
 from storage.database import Database
@@ -199,6 +207,9 @@ class CaptureDaemon:
         should_record = not is_same_window or time_since_last >= 60
 
         if should_record:
+            # Best-effort project signal. Title/URL only — no extra
+            # AppleScript calls beyond what we already made for browser URL.
+            project_hint = get_project_hint(window)
             event = WindowEvent(
                 timestamp=now,
                 app_name=window.app_name,
@@ -207,12 +218,16 @@ class CaptureDaemon:
                 bundle_id=window.bundle_id,
                 url=window.url,
                 is_idle=False,
+                project_hint=project_hint,
             )
             self.db.insert_event(event)
             self._events_since_start += 1
             self.last_window = window
             self.last_event_time = now
-            log.debug(f"{window.app_name} | {window.window_title[:60]} [{category}]")
+            log.debug(
+                f"{window.app_name} | {window.window_title[:60]} [{category}]"
+                + (f" → {project_hint}" if project_hint else "")
+            )
 
         return window
 
@@ -298,12 +313,26 @@ class CaptureDaemon:
         log.info(f"  Idle threshold: {self.settings.capture.idle_threshold}s")
         log.info(f"  Database: {DB_PATH}")
 
-        # Auto-backup database on startup
+        # Auto-backup database on startup — rolling daily, keep last 7.
+        # The legacy single-slot `retra.backup.db` was overwritten on every
+        # restart, so a single corruption could wipe the only good copy.
         try:
             import shutil
-            backup_path = DB_PATH.parent / f"{DB_PATH.stem}.backup.db"
-            shutil.copy2(DB_PATH, backup_path)
-            log.info(f"Database backed up to {backup_path}")
+            backups_dir = DB_PATH.parent / "backups"
+            backups_dir.mkdir(parents=True, exist_ok=True)
+            today_backup = backups_dir / f"{DB_PATH.stem}.{datetime.now():%Y%m%d}.db"
+            if not today_backup.exists():
+                shutil.copy2(DB_PATH, today_backup)
+                log.info(f"Database backed up to {today_backup.name}")
+            # Prune older than 7 days
+            keep = 7
+            existing = sorted(backups_dir.glob(f"{DB_PATH.stem}.[0-9]*.db"))
+            for old in existing[:-keep]:
+                old.unlink(missing_ok=True)
+                log.info(f"Pruned old backup {old.name}")
+            # Also keep the legacy single-slot copy as a hot-spare for tools
+            # that still look for it
+            shutil.copy2(DB_PATH, DB_PATH.parent / f"{DB_PATH.stem}.backup.db")
         except Exception as e:
             log.warning(f"Backup failed (non-fatal): {e}")
 

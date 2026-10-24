@@ -4,3 +4,6 @@ venv/
 __pycache__/
 *.pyc
 node_modules/
+vision.md
+linear-staging/
+.DS_Store
