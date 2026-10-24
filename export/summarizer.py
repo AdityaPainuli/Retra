@@ -183,7 +183,9 @@ def detect_projects(summary: DailySummary) -> dict[str, int]:
     for proj, secs in project_seconds.items():
         # Normalize: strip prefixes, lowercase for comparison
         base = proj.split("/")[-1].lower().strip(".")
-        if base in _SKIP_PROJECTS or not _is_real_project_name(base):
+        # Validate the original key: "acme/retra" is a strong repo signal even
+        # though its bare base "retra" would fail the English-word check.
+        if base in _SKIP_PROJECTS or not _is_real_project_name(proj):
             continue
         # Use the original casing of the longest key
         existing = None
@@ -405,13 +407,14 @@ def _generate_narrative_with_claude(summary: DailySummary) -> Optional[list[dict
     try:
         beats = json.loads(raw)
     except json.JSONDecodeError:
-        # Sometimes the model wraps the array in an object
-        try:
-            obj = json.loads(raw)
-            beats = obj.get("beats") or obj.get("timeline") or []
-        except Exception:
-            print(f"[Retra] Narrative parse failed; raw={raw[:200]}")
-            return None
+        print(f"[Retra] Narrative parse failed; raw={raw[:200]}")
+        return None
+    # Sometimes the model wraps the array in an object
+    if isinstance(beats, dict):
+        beats = beats.get("beats") or beats.get("timeline") or []
+    if not isinstance(beats, list):
+        print(f"[Retra] Narrative has unexpected shape; raw={raw[:200]}")
+        return None
 
     cleaned: list[dict] = []
     for b in beats:

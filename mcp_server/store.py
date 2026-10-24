@@ -3,7 +3,7 @@ Read-only data access for the MCP server.
 
 The capture daemon writes to the DB continuously, so everything here opens
 SQLite with mode=ro and never runs the schema/migration step. Durations come
-from gaps between consecutive window_events rows, using the same cap as the
+from gaps between consecutive window_events rows, using the same rules as the
 attribution pass, so numbers line up with the dashboard's project view.
 """
 
@@ -20,12 +20,11 @@ from typing import Iterable, Optional
 from urllib.parse import urlsplit
 
 from config.settings import DB_PATH, get_settings
-from export.attribution import GAP_CAP_SEC, attribute_projects
+from export.attribution import attribute_projects, event_seconds
 from storage.database import Database
 from storage.models import WindowEvent
 
 PRIVATE = "[private]"
-TAIL_SEC = 60  # matches attribution's tail for the last event in a range
 
 
 class ReadOnlyDatabase(Database):
@@ -246,8 +245,8 @@ class Span:
 def build_spans(events: list[WindowEvent], end_cap: Optional[datetime] = None) -> list[Span]:
     """Turn raw events into duration-weighted spans (idle rows dropped).
 
-    Each row represents the time until the next row, capped at GAP_CAP_SEC.
-    The final row gets a short tail, clipped to `end_cap` (e.g. now).
+    Each row's duration follows attribution.event_seconds. The final row's
+    tail is clipped to `end_cap` (e.g. now).
     """
     private_ids = {e.id for e in events if is_private(e.app_name, e.window_title, e.url or "")}
     # Private events must not anchor attribution, or their project leaks onto
@@ -257,13 +256,10 @@ def build_spans(events: list[WindowEvent], end_cap: Optional[datetime] = None) -
     for i, e in enumerate(events):
         if e.is_idle:
             continue
-        if i + 1 < len(events):
-            gap = (events[i + 1].timestamp - e.timestamp).total_seconds()
-        else:
-            gap = TAIL_SEC
-            if end_cap is not None:
-                gap = min(gap, (end_cap - e.timestamp).total_seconds())
-        secs = int(max(0, min(gap, GAP_CAP_SEC)))
+        nxt = events[i + 1] if i + 1 < len(events) else None
+        secs = event_seconds(e, nxt)
+        if nxt is None and end_cap is not None:
+            secs = int(max(0, min(secs, (end_cap - e.timestamp).total_seconds())))
         private = e.id in private_ids
         spans.append(Span(
             ts=e.timestamp,

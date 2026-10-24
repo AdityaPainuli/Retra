@@ -534,8 +534,11 @@ class Database:
                 idle_seconds += min(gap, IDLE_CAP)
                 idle_start = None
         if idle_start is not None:
-            # Trailing idle (no closing active event): count one cap-worth.
-            idle_seconds += IDLE_CAP
+            # Trailing idle (no closing active event): count up to now or the
+            # end of the day, whichever comes first, capped like the rest.
+            day_end = datetime.combine(target_date + timedelta(days=1), datetime.min.time())
+            gap = int((min(datetime.now(), day_end) - idle_start).total_seconds())
+            idle_seconds += max(0, min(gap, IDLE_CAP))
         summary.idle_minutes = idle_seconds // 60
 
         # Fix E: app_switches = count of distinct non-idle activity blocks.

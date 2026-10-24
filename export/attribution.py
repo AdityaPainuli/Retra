@@ -32,7 +32,22 @@ from capture.window_tracker import project_hint_from_title_url
 
 
 CONTEXT_WINDOW_MIN = 10           # ±10 min around an anchor counts as "in context"
-GAP_CAP_SEC = 300                 # match aggregate_sessions' inter-event cap
+HEARTBEAT_SEC = 60                # Database.HEARTBEAT_INTERVAL: tail past last confirmed activity
+SAME_APP_MERGE_SEC = 600          # aggregate_sessions merges same-app gaps below this
+
+
+def event_seconds(e: WindowEvent, nxt: Optional[WindowEvent]) -> int:
+    """Seconds an event represents, using the same rules as aggregate_sessions
+    so project totals reconcile with tracked time:
+      - same app continues (not idle) within SAME_APP_MERGE_SEC: full gap
+      - app switch, idle, long gap or end of data: at most HEARTBEAT_SEC
+    """
+    if nxt is None:
+        return HEARTBEAT_SEC
+    gap = max(0, int((nxt.timestamp - e.timestamp).total_seconds()))
+    if not nxt.is_idle and nxt.app_name == e.app_name and gap < SAME_APP_MERGE_SEC:
+        return gap
+    return min(gap, HEARTBEAT_SEC)
 
 
 def _event_anchor(e: WindowEvent) -> Optional[str]:
@@ -117,8 +132,8 @@ def day_project_totals(
     Compute per-project seconds for a day, plus an unattributed bucket
     so totals stay honest.
 
-    Walks events in time order; each event contributes (next_event.ts -
-    this.ts) seconds, capped at GAP_CAP_SEC, to its attributed project.
+    Walks events in time order; each event contributes event_seconds() to
+    its attributed project.
     Idle events contribute nothing (they break attribution naturally).
 
     Returns:
@@ -148,13 +163,8 @@ def day_project_totals(
     for i, e in enumerate(events_list):
         if e.is_idle:
             continue
-        # Time this event "represents" up to the next event
-        if i + 1 < len(events_list):
-            gap = int((events_list[i + 1].timestamp - e.timestamp).total_seconds())
-            secs = max(0, min(gap, GAP_CAP_SEC))
-        else:
-            # Last event of the day — give it one heartbeat-interval tail
-            secs = 60
+        nxt = events_list[i + 1] if i + 1 < len(events_list) else None
+        secs = event_seconds(e, nxt)
 
         proj = attribution.get(e.id)
         if not proj:

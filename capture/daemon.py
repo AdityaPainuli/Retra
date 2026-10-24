@@ -9,6 +9,7 @@ import time
 import signal
 import sys
 import logging
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -34,6 +35,18 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("retra")
+
+
+def _backup_db(src: Path, dest: Path):
+    """Snapshot via SQLite's backup API so committed pages still sitting in
+    the WAL are included (a plain file copy of retra.db can miss them)."""
+    source = sqlite3.connect(src)
+    target = sqlite3.connect(dest)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
 
 
 class CaptureDaemon:
@@ -174,7 +187,8 @@ class CaptureDaemon:
             return None
 
         # Check privacy blocklist
-        if self._is_blocked(window):
+        blocked = self._is_blocked(window)
+        if blocked:
             window = ActiveWindow(
                 app_name=window.app_name,
                 window_title="[blocked]",
@@ -209,7 +223,9 @@ class CaptureDaemon:
         if should_record:
             # Best-effort project signal. Title/URL only — no extra
             # AppleScript calls beyond what we already made for browser URL.
-            project_hint = get_project_hint(window)
+            # Never for blocked windows: the hint lookup can read a terminal's
+            # cwd and would persist the private repo name.
+            project_hint = None if blocked else get_project_hint(window)
             event = WindowEvent(
                 timestamp=now,
                 app_name=window.app_name,
@@ -317,12 +333,11 @@ class CaptureDaemon:
         # The legacy single-slot `retra.backup.db` was overwritten on every
         # restart, so a single corruption could wipe the only good copy.
         try:
-            import shutil
             backups_dir = DB_PATH.parent / "backups"
             backups_dir.mkdir(parents=True, exist_ok=True)
             today_backup = backups_dir / f"{DB_PATH.stem}.{datetime.now():%Y%m%d}.db"
             if not today_backup.exists():
-                shutil.copy2(DB_PATH, today_backup)
+                _backup_db(DB_PATH, today_backup)
                 log.info(f"Database backed up to {today_backup.name}")
             # Prune older than 7 days
             keep = 7
@@ -332,7 +347,7 @@ class CaptureDaemon:
                 log.info(f"Pruned old backup {old.name}")
             # Also keep the legacy single-slot copy as a hot-spare for tools
             # that still look for it
-            shutil.copy2(DB_PATH, DB_PATH.parent / f"{DB_PATH.stem}.backup.db")
+            _backup_db(DB_PATH, DB_PATH.parent / f"{DB_PATH.stem}.backup.db")
         except Exception as e:
             log.warning(f"Backup failed (non-fatal): {e}")
 

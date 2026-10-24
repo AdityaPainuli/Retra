@@ -29,7 +29,9 @@ export default function Replay() {
   const timerRef = useRef(null);
 
   const allScreenshots = data?.screenshots || [];
-  const sessions = data?.sessions || [];
+  // Chronological blocks; data.sessions is grouped per app (first-to-last
+  // use), which would read as one continuous block here.
+  const sessions = data?.timeline || [];
   const urlEvents = data?.url_events || [];
 
   // Map screenshot timestamps → category by matching to the smallest

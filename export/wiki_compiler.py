@@ -79,11 +79,9 @@ def compile_daily_note(target_date: date = None):
     response = _call_claude(prompt)
 
     if response:
+        # _apply_wiki_updates rebuilds index.md; log.md is ours too, so the
+        # LLM can never silently drop either.
         written = _apply_wiki_updates(wiki_dir, response)
-        # Deterministically maintain index.md + log.md so the LLM can never
-        # silently drop them. Run unconditionally — even if Claude emitted
-        # versions, our own are the source of truth.
-        _rebuild_index(wiki_dir)
         _append_log_entry(
             wiki_dir,
             target_date,
@@ -138,7 +136,6 @@ def compile_week(end_date: date = None):
 
     if response:
         written = _apply_wiki_updates(wiki_dir, response)
-        _rebuild_index(wiki_dir)
         _append_log_entry(
             wiki_dir,
             end_date,
@@ -525,7 +522,8 @@ def _apply_wiki_updates(wiki_dir: Path, response: str) -> list[str]:
     """Parse the LLM response and write files. Returns list of relpaths written.
 
     Skips index.md / log.md — those are regenerated deterministically by
-    _rebuild_index and _append_log_entry, so we never trust the LLM's version.
+    _rebuild_index (called here, so every caller keeps the index current) and
+    _append_log_entry, so we never trust the LLM's version.
     Also skips files inside _quarantine/ to avoid resurrecting junk pages.
     """
     pattern = r'===FILE:\s*(.+?)===\s*\n(.*?)===END_FILE==='
@@ -554,6 +552,8 @@ def _apply_wiki_updates(wiki_dir: Path, response: str) -> list[str]:
         full_path.write_text(content + "\n", encoding="utf-8")
         written.append(filepath)
         print(f"  Updated: {filepath}")
+
+    _rebuild_index(wiki_dir)
     return written
 
 

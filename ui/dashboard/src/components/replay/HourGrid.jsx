@@ -24,7 +24,7 @@ function nearestShotIdx(screenshots, targetMs) {
  *
  * Props:
  *   screenshots
- *   sessions  — grouped-by-app entries from /api/day
+ *   sessions  — chronological blocks (/api/day `timeline`)
  *   currentIdx
  *   onSeek(idx)
  */

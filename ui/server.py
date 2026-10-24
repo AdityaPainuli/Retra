@@ -149,6 +149,20 @@ async def get_day(date_str: str):
             }
             for i, g in enumerate(grouped_list)
         ],
+        # Chronological activity blocks (not grouped by app) for Replay,
+        # which needs real start/end times rather than first/last use.
+        "timeline": [
+            {
+                "start_time": s.start_time.isoformat(),
+                "end_time": s.end_time.isoformat(),
+                "app_name": s.app_name,
+                "category": s.category,
+                "duration_seconds": s.duration_seconds,
+                "window_titles": s.window_titles[:5],
+                "domains": s.domains[:5],
+            }
+            for s in sorted(sessions, key=lambda s: s.start_time)
+        ],
         "screenshots": [
             {
                 "id": sc.id,
@@ -418,9 +432,10 @@ async def wiki_compile_status():
 
     log_content = log_path.read_text(encoding="utf-8")
 
-    # Extract dates from log entries like "## [2026-04-06] ingest | Daily note for 2026-04-06".
+    # Extract dates from log entries like "## [2026-04-06] ingest | Daily note for 2026-04-06"
+    # or the newer "## [2026-04-06 23:00] ingest".
     # Log entries are prepended (newest first), so sort to find the actual latest.
-    compiled_dates = re.findall(r'\[(\d{4}-\d{2}-\d{2})\] ingest', log_content)
+    compiled_dates = re.findall(r'\[(\d{4}-\d{2}-\d{2})(?: \d{2}:\d{2})?\] ingest', log_content)
     today = date.today().isoformat()
 
     return {

@@ -16,12 +16,8 @@ export default function SessionContext({ sessions, urlEvents, screenshot }) {
     if (!screenshot || !sessions?.length) return null;
     const t = new Date(screenshot.timestamp).getTime();
 
-    // Sessions list is grouped-by-app from /api/day; for time bracketing
-    // we want the *raw* time blocks. The grouped sessions still contain
-    // start_time and end_time covering their first and last sub-stretch,
-    // so for the purposes of "which session am I in" we accept any
-    // session whose [start, end] window contains t — pick the smallest
-    // (most specific) such window.
+    // Sessions are chronological blocks (/api/day `timeline`). Pick the
+    // smallest block whose [start, end] window contains t.
     let containing = null;
     let containingSpan = Infinity;
     for (const s of sessions) {
