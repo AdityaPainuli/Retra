@@ -36,7 +36,8 @@ export default function SessionContext({ sessions, urlEvents, screenshot }) {
       }
     }
 
-    // Previous and next sessions by time (regardless of containment)
+    // Previous and next sessions by time. The containing session usually
+    // starts before t too, so skip it or "came from" shows the current block.
     const sortedByStart = [...sessions].sort(
       (a, b) => new Date(a.start_time) - new Date(b.start_time)
     );
@@ -44,7 +45,7 @@ export default function SessionContext({ sessions, urlEvents, screenshot }) {
     let next = null;
     for (const s of sortedByStart) {
       const start = new Date(s.start_time).getTime();
-      if (start < t && (!prev || start > new Date(prev.start_time).getTime())) prev = s;
+      if (s !== containing && start < t && (!prev || start > new Date(prev.start_time).getTime())) prev = s;
       if (start > t && !next) next = s;
     }
 

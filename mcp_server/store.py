@@ -34,12 +34,16 @@ class ReadOnlyDatabase(Database):
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
         self._persistent_conn = None
+        self._has_project_hint: Optional[bool] = None
         if not Path(self.db_path).exists():
             raise FileNotFoundError(f"Retra database not found at {self.db_path}")
+        # as_uri() percent-encodes '#' and '?', which would otherwise end the
+        # filename early and drop mode=ro.
+        self._uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(self._uri, uri=True)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         try:
@@ -52,9 +56,14 @@ class ReadOnlyDatabase(Database):
 
     def get_events_between(self, start: datetime, end: datetime) -> list[WindowEvent]:
         with self._conn() as conn:
-            rows = conn.execute("""
+            # Migrations never run here, so pre-upgrade DBs may lack this column.
+            if self._has_project_hint is None:
+                cols = {r["name"] for r in conn.execute("PRAGMA table_info(window_events)")}
+                self._has_project_hint = "project_hint" in cols
+            hint_col = "project_hint" if self._has_project_hint else "NULL AS project_hint"
+            rows = conn.execute(f"""
                 SELECT id, timestamp, app_name, window_title, category,
-                       bundle_id, url, is_idle, project_hint
+                       bundle_id, url, is_idle, {hint_col}
                 FROM window_events
                 WHERE timestamp >= ? AND timestamp < ?
                 ORDER BY timestamp ASC
@@ -90,19 +99,33 @@ class ReadOnlyDatabase(Database):
 
     def search_url_events(self, pattern: str, start: datetime, end: datetime,
                           limit: int) -> list[dict]:
+        """Matching pages grouped by domain + title, with private rows dropped
+        before they are merged (grouping also by app so blocked apps can be
+        filtered per row)."""
         with self._conn() as conn:
             rows = conn.execute("""
-                SELECT domain, page_title, url,
+                SELECT domain, page_title, app_name, MAX(url) AS url,
                        SUM(duration_seconds) AS seconds,
                        MAX(timestamp) AS last_seen
                 FROM url_events
                 WHERE timestamp >= ? AND timestamp < ?
                   AND (url LIKE ? ESCAPE '\\' OR page_title LIKE ? ESCAPE '\\')
-                GROUP BY domain, page_title
+                GROUP BY domain, page_title, app_name
                 ORDER BY last_seen DESC
                 LIMIT ?
-            """, (start.isoformat(), end.isoformat(), pattern, pattern, limit * 3)).fetchall()
-        return [dict(r) for r in rows]
+            """, (start.isoformat(), end.isoformat(), pattern, pattern, limit * 5)).fetchall()
+
+        merged: dict[tuple, dict] = {}
+        for r in rows:
+            if is_private(r["app_name"], r["page_title"] or "", r["url"] or ""):
+                continue
+            m = merged.setdefault((r["domain"], r["page_title"]), {
+                "domain": r["domain"], "page_title": r["page_title"], "url": r["url"],
+                "seconds": 0, "last_seen": r["last_seen"],
+            })
+            m["seconds"] += r["seconds"] or 0
+            m["last_seen"] = max(m["last_seen"], r["last_seen"])
+        return sorted(merged.values(), key=lambda m: m["last_seen"], reverse=True)[:limit]
 
 
 def db_path() -> Path:
@@ -132,6 +155,27 @@ def is_private(app: str, title: str = "", url: str = "") -> bool:
     return any(p.lower() in hay for p in privacy.blocked_url_patterns)
 
 
+def redact_text(text: Optional[str]) -> Optional[str]:
+    """Drop lines of saved prose (AI reflections, notes, wiki pages) that
+    mention a blocked app or URL pattern. These were written before the
+    current blocklist may have existed, so they can't be filtered per event."""
+    if not text:
+        return text
+    privacy = get_settings().privacy
+    terms = [t.lower() for t in privacy.blocked_apps + privacy.blocked_url_patterns if t]
+    terms.append("[blocked]")
+    kept = []
+    removed = 0
+    for line in text.splitlines():
+        if any(t in line.lower() for t in terms):
+            removed += 1
+        else:
+            kept.append(line)
+    if removed:
+        kept.append(f"[{removed} line(s) hidden by privacy settings]")
+    return "\n".join(kept)
+
+
 # ── Formatting helpers ───────────────────────────────────────────
 
 def compact_url(url: Optional[str], max_len: int = 100) -> Optional[str]:
@@ -141,7 +185,9 @@ def compact_url(url: Optional[str], max_len: int = 100) -> Optional[str]:
     try:
         parts = urlsplit(url)
     except ValueError:
-        return url[:max_len]
+        # Never fall back to the raw string: query/fragment may hold tokens.
+        stripped = url.split("?", 1)[0].split("#", 1)[0].split("://", 1)[-1]
+        return stripped[:max_len] or None
     host = parts.netloc.removeprefix("www.")
     out = f"{host}{parts.path}".rstrip("/")
     return out[:max_len] if out else None
@@ -175,7 +221,11 @@ def parse_when(value: Optional[str], default: datetime) -> datetime:
         return datetime.combine(parse_day(v), datetime.min.time())
     if len(v) == 10:
         return datetime.combine(date.fromisoformat(v), datetime.min.time())
-    return datetime.fromisoformat(value)
+    dt = datetime.fromisoformat(value.strip())
+    if dt.tzinfo is not None:
+        # Captured timestamps are naive local time.
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
 
 
 # ── Event spans ──────────────────────────────────────────────────
@@ -199,7 +249,10 @@ def build_spans(events: list[WindowEvent], end_cap: Optional[datetime] = None) -
     Each row represents the time until the next row, capped at GAP_CAP_SEC.
     The final row gets a short tail, clipped to `end_cap` (e.g. now).
     """
-    attribution = attribute_projects(events)
+    private_ids = {e.id for e in events if is_private(e.app_name, e.window_title, e.url or "")}
+    # Private events must not anchor attribution, or their project leaks onto
+    # neighbouring public events. They still count for gap/duration accounting.
+    attribution = attribute_projects(e for e in events if e.id not in private_ids)
     spans: list[Span] = []
     for i, e in enumerate(events):
         if e.is_idle:
@@ -211,7 +264,7 @@ def build_spans(events: list[WindowEvent], end_cap: Optional[datetime] = None) -
             if end_cap is not None:
                 gap = min(gap, (end_cap - e.timestamp).total_seconds())
         secs = int(max(0, min(gap, GAP_CAP_SEC)))
-        private = is_private(e.app_name, e.window_title, e.url or "")
+        private = e.id in private_ids
         spans.append(Span(
             ts=e.timestamp,
             seconds=secs,

@@ -10,6 +10,22 @@ const CATEGORY_LABELS = {
   entertainment: 'Entertainment',
 };
 
+function Pill({ active, color, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${
+        active
+          ? 'border-transparent text-black font-medium'
+          : 'border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
+      }`}
+      style={active && color ? { background: color } : undefined}
+    >
+      {children}
+    </button>
+  );
+}
+
 /**
  * Pills to filter the screenshot stream by category or app.
  *
@@ -36,22 +52,6 @@ export default function FilterPills({ screenshots, sessions, filter, onChange })
       .map(([name]) => name);
     return { categoriesPresent: cats, topApps: apps };
   }, [screenshots, sessions]);
-
-  function Pill({ active, color, onClick, children }) {
-    return (
-      <button
-        onClick={onClick}
-        className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${
-          active
-            ? 'border-transparent text-black font-medium'
-            : 'border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
-        }`}
-        style={active && color ? { background: color } : undefined}
-      >
-        {children}
-      </button>
-    );
-  }
 
   const isAll = filter?.type === 'all' || !filter;
 

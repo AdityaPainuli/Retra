@@ -1,12 +1,26 @@
 import { useMemo } from 'react';
 import { CATEGORY_COLOR_BY_KEY } from '../../hooks';
 
+function nearestShotIdx(screenshots, targetMs) {
+  let best = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < screenshots.length; i++) {
+    const d = Math.abs(new Date(screenshots[i].timestamp).getTime() - targetMs);
+    if (d < bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
 /**
  * Per-hour mini cards. For each hour with activity, shows:
  *   - top app of the hour
  *   - non-idle minutes attributed
  *   - dominant category color bar
- * Click → seek replay to the first screenshot in that hour.
+ * Click → seek replay to the first screenshot in that hour (or the nearest
+ * one, since capture skips unchanged frames and an hour can have none).
  *
  * Props:
  *   screenshots
@@ -64,7 +78,7 @@ export default function HourGrid({ screenshots, sessions, currentIdx, onSeek }) 
         totalMin: Math.round(totalSecs / 60),
         topCat,
         topApp,
-        firstIdx: firstShotByHour[h] ?? 0,
+        firstIdx: firstShotByHour[h] ?? nearestShotIdx(screenshots, dayStart + h * 3600_000),
       });
     }
     return out;

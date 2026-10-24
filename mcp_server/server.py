@@ -20,8 +20,8 @@ from mcp.types import ToolAnnotations
 from config.settings import get_settings
 from mcp_server.store import (
     active_hours, app_breakdown, category_breakdown, compact_url, filter_project,
-    get_db, is_private, label, load_spans, minutes, parse_day, parse_when, project_breakdown, short,
-    title_breakdown, url_breakdown,
+    get_db, label, load_spans, minutes, parse_day, parse_when, project_breakdown,
+    redact_text, short, title_breakdown, url_breakdown,
 )
 
 MAX_NOTE_CHARS = 8000
@@ -136,7 +136,7 @@ def day_summary(day: str = "today") -> dict:
     note_path = get_settings().obsidian.output_dir / f"{d.isoformat()}.md"
     note = None
     if note_path.exists():
-        text = note_path.read_text(errors="replace")
+        text = redact_text(note_path.read_text(errors="replace"))
         note = text[:MAX_NOTE_CHARS] + ("\n…[truncated]" if len(text) > MAX_NOTE_CHARS else "")
 
     return {
@@ -158,7 +158,7 @@ def day_summary(day: str = "today") -> dict:
         "projects": project_breakdown(spans, 12),
         "apps": app_breakdown(spans, 10),
         "titles": title_breakdown(spans, 12),
-        "ai_summary": summary.ai_summary,
+        "ai_summary": redact_text(summary.ai_summary),
         "obsidian_note": note,
     }
 
@@ -209,7 +209,6 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
         {"domain": p["domain"], "title": short(p["page_title"]), "url": compact_url(p["url"]),
          "minutes": minutes(p["seconds"] or 0), "last_seen": p["last_seen"][:16].replace("T", " ")}
         for p in get_db().search_url_events(f"%{escaped}%", start, end, limit)
-        if not is_private("", p["page_title"] or "", p["url"] or "")
     ][:10]
 
     return {
@@ -275,7 +274,7 @@ def wiki_page(name: Optional[str] = None) -> dict:
 
     if not name:
         index = wiki / "index.md"
-        text = index.read_text(errors="replace")[:MAX_WIKI_CHARS] if index.exists() else None
+        text = redact_text(index.read_text(errors="replace"))[:MAX_WIKI_CHARS] if index.exists() else None
         # The index already links every page; only list files when it's missing.
         return {"index": text} if text else {"pages": pages[:300]}
 
@@ -290,7 +289,7 @@ def wiki_page(name: Optional[str] = None) -> dict:
     path = (wiki / f"{match}.md").resolve()
     if not path.is_relative_to(wiki):
         return {"error": "invalid page name"}
-    text = path.read_text(errors="replace")
+    text = redact_text(path.read_text(errors="replace"))
     return {
         "page": match,
         "content": text[:MAX_WIKI_CHARS] + ("\n…[truncated]" if len(text) > MAX_WIKI_CHARS else ""),

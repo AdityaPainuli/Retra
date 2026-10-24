@@ -51,7 +51,7 @@ export default function NarrativeTrack({ date, screenshot }) {
     if (!beats?.length || !screenshot) return null;
     const t = new Date(screenshot.timestamp);
     const cur = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-    let active = beats[0];
+    let active = null;
     for (const b of beats) {
       if (b.time <= cur) active = b;
       else break;

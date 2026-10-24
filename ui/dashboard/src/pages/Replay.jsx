@@ -228,7 +228,7 @@ export default function Replay() {
           </div>
 
           {/* Narrative track */}
-          <NarrativeTrack date={date} screenshot={shot} />
+          <NarrativeTrack key={date} date={date} screenshot={shot} />
 
           {/* Playback controls */}
           <div className="flex items-center justify-center gap-3">
