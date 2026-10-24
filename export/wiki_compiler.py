@@ -524,8 +524,8 @@ def _call_claude(prompt: str) -> Optional[str]:
         pipeline_status.note_error(f"Claude API: {e}")
         return None
 
-    if stop_reason in ("max_tokens", "refusal"):
-        # A cut-off response would write half-finished wiki pages.
+    if stop_reason not in ("end_turn", "stop_sequence"):
+        # A cut-off or interrupted stream would write half-finished wiki pages.
         print(f"[Retra] Claude response unusable (stop_reason={stop_reason})")
         pipeline_status.note_error(f"Claude API: stop_reason={stop_reason}")
         return None

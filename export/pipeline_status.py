@@ -4,7 +4,9 @@ to a small JSON file so the menubar and `status` can tell when the pipeline
 is failing instead of it failing silently in a log nobody reads.
 """
 
+import fcntl
 import json
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -21,21 +23,30 @@ def note_error(message: str):
 
 def record(stage: str, ok: bool, detail: str = ""):
     global _last_error
-    status = read()
-    entry = status.get(stage, {})
-    now = datetime.now().isoformat(timespec="seconds")
-    entry["ok"] = ok
-    entry["last_run"] = now
-    if ok:
-        entry["last_success"] = now
-        entry.pop("error", None)
-    else:
-        entry["error"] = detail or _last_error or "unknown error"
+    error = detail or _last_error or "unknown error"
     _last_error = None
-    status[stage] = entry
+    now = datetime.now().isoformat(timespec="seconds")
     try:
         PIPELINE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PIPELINE_STATUS_PATH.write_text(json.dumps(status, indent=2))
+        # The journal job, dashboard and menubar all write this file, so the
+        # read/update/write runs under an exclusive lock, and the new JSON is
+        # swapped in atomically so readers never see a half-written file.
+        lock_path = PIPELINE_STATUS_PATH.with_suffix(".lock")
+        with open(lock_path, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            status = read()
+            entry = status.get(stage, {})
+            entry["ok"] = ok
+            entry["last_run"] = now
+            if ok:
+                entry["last_success"] = now
+                entry.pop("error", None)
+            else:
+                entry["error"] = error
+            status[stage] = entry
+            tmp = PIPELINE_STATUS_PATH.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(status, indent=2))
+            os.replace(tmp, PIPELINE_STATUS_PATH)
     except OSError as e:
         print(f"[Retra] Could not write pipeline status: {e}")
 

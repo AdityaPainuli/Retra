@@ -70,7 +70,9 @@ def generate_daily_note(
     if include_ai_summary:
         # Prefer cached — compute_daily_summary already loaded it into
         # summary.ai_summary if one exists in the daily_summaries table.
-        if prefer_cached_ai and summary.ai_summary:
+        # Today is still being captured, so a reflection cached this morning
+        # would be stale by the 23:00 export. Only reuse it for past days.
+        if prefer_cached_ai and summary.ai_summary and target_date < date.today():
             ai_text = summary.ai_summary
         elif summary.total_tracked_minutes > 30:
             ai_text = generate_summary(summary)
@@ -421,10 +423,29 @@ def export_to_obsidian(
     prefer_cached_ai: passed to generate_daily_note — when True, reuses the
     cached AI reflection from the DB instead of regenerating.
     """
-    settings = get_settings()
     if target_date is None:
         target_date = date.today()
+    try:
+        filepath = _write_daily_notes(target_date, prefer_cached_ai)
+    except Exception as e:
+        pipeline_status.record("journal", ok=False, detail=str(e))
+        raise
+    pipeline_status.record("journal", ok=True)
 
+    if compile_wiki:
+        try:
+            from export.wiki_compiler import compile_daily_note
+            compile_daily_note(target_date)
+        except Exception as e:
+            print(f"[Retra] Wiki compile skipped: {e}")
+            pipeline_status.record("wiki", ok=False, detail=str(e))
+
+    return filepath
+
+
+def _write_daily_notes(target_date: date, prefer_cached_ai: bool) -> Path:
+    """Write the daily note and its linked app/project/category/domain notes."""
+    settings = get_settings()
     db = Database(DB_PATH)
     summary = db.compute_daily_summary(target_date)
     projects = detect_projects(summary)
@@ -464,14 +485,4 @@ def export_to_obsidian(
             _generate_domain_note(domain, output_dir, short_date)
 
     print(f"[Retra] Journal exported to: {filepath}")
-    pipeline_status.record("journal", ok=True)
-
-    if compile_wiki:
-        try:
-            from export.wiki_compiler import compile_daily_note
-            compile_daily_note(target_date)
-        except Exception as e:
-            print(f"[Retra] Wiki compile skipped: {e}")
-            pipeline_status.record("wiki", ok=False, detail=str(e))
-
     return filepath
