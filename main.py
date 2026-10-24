@@ -18,6 +18,7 @@ Usage:
     python main.py lint        Health check the wiki
     python main.py ask "question"  Query the wiki
     python main.py backfill    Compile all existing daily notes into wiki
+    python main.py mcp         Run the read-only MCP server (stdio) for local agents
     python main.py install     Install as macOS Launch Agent (auto-start on login)
     python main.py uninstall   Remove Launch Agent
 """
@@ -229,6 +230,11 @@ def cmd_backfill():
     print("[Retra] Backfill complete")
 
 
+def cmd_mcp():
+    from mcp_server.server import run
+    run()
+
+
 def cmd_status():
     from capture.health import get_health
     from storage.database import Database
@@ -415,6 +421,7 @@ COMMANDS = {
     "lint": cmd_lint,
     "ask": cmd_ask,
     "backfill": cmd_backfill,
+    "mcp": cmd_mcp,
     "install": cmd_install,
     "uninstall": cmd_uninstall,
 }

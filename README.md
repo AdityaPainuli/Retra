@@ -166,6 +166,7 @@ python main.py start
 | `python main.py lint`               | Health check the wiki                                   |
 | `python main.py ask "question"`     | Query the wiki with a question                          |
 | `python main.py backfill`           | Compile all existing daily notes into wiki              |
+| `python main.py mcp`                | Run the read-only MCP server (stdio) for local agents   |
 | `python main.py install`            | Install as macOS Launch Agents (auto-start on login)    |
 | `python main.py uninstall`          | Remove Launch Agents                                    |
 
@@ -230,6 +231,9 @@ retra/
 │   ├── obsidian.py             # Markdown journal generation (auto-triggers wiki compile)
 │   ├── summarizer.py           # AI summary (Claude/Ollama) + project detection
 │   └── wiki_compiler.py        # LLM wiki compiler (ingest, rollup, lint, query)
+├── mcp_server/
+│   ├── server.py               # Read-only MCP tools for local agents (stdio)
+│   └── store.py                # Read-only DB access, privacy filtering, aggregation
 ├── ui/
 │   ├── server.py               # FastAPI server (30+ endpoints)
 │   ├── menubar.py              # macOS menubar app with health indicator
@@ -321,6 +325,42 @@ python main.py ask "What are my distraction patterns?"
 ```
 
 Or use the **Wiki** page in the dashboard to browse, search, and ask questions interactively.
+
+### MCP Server
+
+`python main.py mcp` runs a local, read-only [MCP](https://modelcontextprotocol.io) server over stdio, so Claude Code, Claude desktop, or any other MCP client on your machine can ask what you're working on.
+
+| Tool | What it returns |
+|------|-----------------|
+| `current_activity(minutes_back=30)` | What's active right now, plus the last N minutes by project, app, and window |
+| `recent_work(days=1, project=None)` | Time per project and category, top windows and URLs, active hours (up to 30 days) |
+| `day_summary(day="today")` | Focus stats, projects, AI reflection, and the Obsidian daily note for one day |
+| `search_activity(query, since, until)` | When something was worked on, matched against window titles, URLs, and page titles |
+| `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
+| `wiki_page(name=None)` | A page from `retra-wiki/` in the vault (index when no name is given) |
+
+It opens `data/retra.db` with SQLite `mode=ro`, makes no network calls, and hides apps and URLs matching `privacy.blocked_apps` / `blocked_url_patterns` (their time shows as `[private]`). URLs are returned without query strings. Set `RETRA_DB_PATH` to point it at a different database.
+
+Register it with Claude Code (available in every project):
+
+```bash
+claude mcp add --scope user retra -- /path/to/retra/venv/bin/python /path/to/retra/main.py mcp
+```
+
+For Claude desktop, add this to `~/Library/Application Support/Claude/claude_desktop_config.json` and restart the app:
+
+```json
+{
+  "mcpServers": {
+    "retra": {
+      "command": "/path/to/retra/venv/bin/python",
+      "args": ["/path/to/retra/main.py", "mcp"]
+    }
+  }
+}
+```
+
+Use absolute paths to the venv's Python so the client doesn't need your shell environment. Then ask things like "what am I working on?" or "when did I last touch the bifrost PRs?".
 
 ## Privacy
 
