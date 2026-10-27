@@ -21,6 +21,7 @@ except ImportError:
 
 from config.settings import get_settings
 from export import pipeline_status
+from export.claude_retry import RETRYABLE_STREAM_ERRORS, RetryableStreamError, call_with_retries
 
 
 def _get_wiki_dir() -> Path:
@@ -492,9 +493,12 @@ def _call_claude(prompt: str) -> Optional[str]:
         method="POST",
     )
 
-    chunks: list[str] = []
-    stop_reason = None
-    try:
+    class _StreamError(Exception):
+        pass
+
+    def attempt() -> tuple[str, Optional[str]]:
+        chunks: list[str] = []
+        stop_reason = None
         with urllib.request.urlopen(req, timeout=600, context=_ssl_context) as resp:
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -516,9 +520,17 @@ def _call_claude(prompt: str) -> Optional[str]:
                     stop_reason = (event.get("delta") or {}).get("stop_reason") or stop_reason
                 elif etype == "error":
                     err = event.get("error") or {}
-                    print(f"[Retra] Claude API stream error: {err.get('message', err)}")
-                    pipeline_status.note_error(f"Claude API: {err.get('message', err)}")
-                    return None
+                    msg = f"stream error: {err.get('message', err)}"
+                    if err.get("type") in RETRYABLE_STREAM_ERRORS:
+                        raise RetryableStreamError(msg)
+                    raise _StreamError(msg)
+        if stop_reason is None:
+            # Connection closed before message_delta: dropped, not finished.
+            raise RetryableStreamError("stream ended before the final event")
+        return "".join(chunks), stop_reason
+
+    try:
+        text, stop_reason = call_with_retries(attempt, "Wiki compile")
     except Exception as e:
         print(f"[Retra] Claude API error: {e}")
         pipeline_status.note_error(f"Claude API: {e}")
@@ -530,7 +542,6 @@ def _call_claude(prompt: str) -> Optional[str]:
         pipeline_status.note_error(f"Claude API: stop_reason={stop_reason}")
         return None
 
-    text = "".join(chunks)
     return text or None
 
 

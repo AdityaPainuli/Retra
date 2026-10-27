@@ -19,6 +19,7 @@ except ImportError:
 from storage.models import DailySummary, Session
 from config.settings import get_settings, DB_PATH
 from export import pipeline_status
+from export.claude_retry import call_with_retries
 
 
 def _response_text(data: dict) -> Optional[str]:
@@ -303,10 +304,12 @@ def summarize_with_claude(summary: DailySummary) -> Optional[str]:
         method="POST",
     )
 
-    try:
+    def attempt() -> dict:
         with urllib.request.urlopen(req, timeout=180, context=_ssl_context) as resp:
-            data = json.loads(resp.read().decode())
-            return _response_text(data)
+            return json.loads(resp.read().decode())
+
+    try:
+        return _response_text(call_with_retries(attempt, "Reflection"))
     except Exception as e:
         print(f"[Retra] Claude API error: {e}")
         pipeline_status.note_error(f"Claude API: {e}")
