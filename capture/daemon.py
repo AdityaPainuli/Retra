@@ -10,7 +10,8 @@ import signal
 import sys
 import logging
 import sqlite3
-from datetime import datetime
+import subprocess
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -27,7 +28,7 @@ from capture.screenshot import ScreenshotCapture
 from capture.idle_detector import is_user_idle
 from storage.database import Database
 from storage.models import WindowEvent, Screenshot
-from config.settings import get_settings, DB_PATH, SCREENSHOTS_DIR, HEARTBEAT_PATH, PID_PATH
+from config.settings import get_settings, PROJECT_ROOT, DB_PATH, SCREENSHOTS_DIR, HEARTBEAT_PATH, PID_PATH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +71,12 @@ class CaptureDaemon:
         self._events_since_start = 0
         self._screenshots_since_start = 0
         self._last_heartbeat_time: float = 0
+        self._last_maintenance_date: Optional[date] = None
+
+        # Catch-up for nightly runs missed while the Mac slept
+        self._last_catchup_check: float = 0
+        self._catchup_proc: Optional[subprocess.Popen] = None
+        self._catchup_runs: dict[date, int] = {}
 
         # Graceful shutdown
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -97,6 +104,77 @@ class CaptureDaemon:
         }
         HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
         HEARTBEAT_PATH.write_text(json.dumps(heartbeat))
+
+    def _run_maintenance(self):
+        """Daily backup + retention cleanup. Runs on startup and at each date change."""
+        self._last_maintenance_date = date.today()
+
+        # Rolling daily backup, keep last 7.
+        try:
+            backups_dir = DB_PATH.parent / "backups"
+            backups_dir.mkdir(parents=True, exist_ok=True)
+            today_backup = backups_dir / f"{DB_PATH.stem}.{datetime.now():%Y%m%d}.db"
+            if not today_backup.exists():
+                _backup_db(DB_PATH, today_backup)
+                log.info(f"Database backed up to {today_backup.name}")
+            keep = 7
+            existing = sorted(backups_dir.glob(f"{DB_PATH.stem}.[0-9]*.db"))
+            for old in existing[:-keep]:
+                old.unlink(missing_ok=True)
+                log.info(f"Pruned old backup {old.name}")
+            # Also keep the legacy single-slot copy as a hot-spare for tools
+            # that still look for it
+            _backup_db(DB_PATH, DB_PATH.parent / f"{DB_PATH.stem}.backup.db")
+        except Exception as e:
+            log.warning(f"Backup failed (non-fatal): {e}")
+
+        privacy = self.settings.privacy
+        try:
+            self.db.cleanup_old_data(
+                event_retention_days=privacy.event_retention_days,
+                screenshot_retention_days=privacy.retention_days,
+            )
+            self.screenshotter.cleanup_old(privacy.retention_days)
+            log.info(
+                "Old data cleanup complete (screenshots: %dd, events: %s)",
+                privacy.retention_days,
+                f"{privacy.event_retention_days}d" if privacy.event_retention_days else "kept forever",
+            )
+        except Exception as e:
+            log.warning(f"Cleanup failed (non-fatal): {e}")
+
+    CATCHUP_CHECK_SEC = 1800
+    # Each run can cost a wiki compile (~$0.30), so cap repeats for a day
+    # whose failure isn't transient.
+    MAX_CATCHUP_RUNS_PER_DAY = 4
+
+    def _maybe_catchup(self):
+        """While the user is active (so the Mac is truly awake), rerun any
+        recent nightly stage that failed or never ran."""
+        now = time.time()
+        if now - self._last_catchup_check < self.CATCHUP_CHECK_SEC:
+            return
+        self._last_catchup_check = now
+        if self._catchup_proc and self._catchup_proc.poll() is None:
+            return
+        today = date.today()
+        if self._catchup_runs.get(today, 0) >= self.MAX_CATCHUP_RUNS_PER_DAY:
+            return
+
+        from export.catchup import pending_days
+        pending = pending_days(today)
+        if not pending:
+            return
+        self._catchup_runs[today] = self._catchup_runs.get(today, 0) + 1
+        log.info("Catch-up needed: %s", {d.isoformat(): sorted(m) for d, m in pending.items()})
+        log_path = Path.home() / "Library" / "Logs" / "retra-catchup.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as out:
+            self._catchup_proc = subprocess.Popen(
+                [sys.executable, str(PROJECT_ROOT / "main.py"), "catchup"],
+                cwd=PROJECT_ROOT, stdout=out, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
     def _write_pid(self):
         """Write PID file for process management."""
@@ -329,35 +407,7 @@ class CaptureDaemon:
         log.info(f"  Idle threshold: {self.settings.capture.idle_threshold}s")
         log.info(f"  Database: {DB_PATH}")
 
-        # Auto-backup database on startup — rolling daily, keep last 7.
-        # The legacy single-slot `retra.backup.db` was overwritten on every
-        # restart, so a single corruption could wipe the only good copy.
-        try:
-            backups_dir = DB_PATH.parent / "backups"
-            backups_dir.mkdir(parents=True, exist_ok=True)
-            today_backup = backups_dir / f"{DB_PATH.stem}.{datetime.now():%Y%m%d}.db"
-            if not today_backup.exists():
-                _backup_db(DB_PATH, today_backup)
-                log.info(f"Database backed up to {today_backup.name}")
-            # Prune older than 7 days
-            keep = 7
-            existing = sorted(backups_dir.glob(f"{DB_PATH.stem}.[0-9]*.db"))
-            for old in existing[:-keep]:
-                old.unlink(missing_ok=True)
-                log.info(f"Pruned old backup {old.name}")
-            # Also keep the legacy single-slot copy as a hot-spare for tools
-            # that still look for it
-            _backup_db(DB_PATH, DB_PATH.parent / f"{DB_PATH.stem}.backup.db")
-        except Exception as e:
-            log.warning(f"Backup failed (non-fatal): {e}")
-
-        # Auto-cleanup old data on startup
-        try:
-            self.db.cleanup_old_data(self.settings.privacy.retention_days)
-            self.screenshotter.cleanup_old(self.settings.privacy.retention_days)
-            log.info("Old data cleanup complete (retention: %dd)", self.settings.privacy.retention_days)
-        except Exception as e:
-            log.warning(f"Cleanup failed (non-fatal): {e}")
+        self._run_maintenance()
 
         while self.running:
             try:
@@ -377,6 +427,14 @@ class CaptureDaemon:
                 if now - self._last_heartbeat_time >= 15:
                     self._write_heartbeat()
                     self._last_heartbeat_time = now
+
+                # Daemon can stay up for months, so backup/cleanup can't
+                # only run on startup.
+                if date.today() != self._last_maintenance_date:
+                    self._run_maintenance()
+
+                if window:
+                    self._maybe_catchup()
 
             except Exception as e:
                 log.error(f"Capture error: {e}")

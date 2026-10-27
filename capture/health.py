@@ -6,12 +6,16 @@ Verifies that the capture daemon is running and recording properly.
 import json
 import os
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 from config.settings import DB_PATH, HEARTBEAT_PATH, PID_PATH
+from export import pipeline_status
+
+# Journal runs nightly at 23:00, so >36h without a success means a missed night.
+JOURNAL_STALE_HOURS = 36
 
 
 @dataclass
@@ -27,6 +31,7 @@ class HealthStatus:
     last_screenshot_time: Optional[datetime]
     db_exists: bool
     db_size_mb: float
+    pipeline: dict = field(default_factory=dict)
 
     @property
     def recording_ok(self) -> bool:
@@ -52,6 +57,21 @@ class HealthStatus:
             return False
         age = (datetime.now() - self.last_screenshot_time).total_seconds()
         return age < 300
+
+    @property
+    def pipeline_problems(self) -> list[str]:
+        """Human-readable list of failing nightly pipeline stages."""
+        problems = []
+        for stage, entry in self.pipeline.items():
+            if not entry.get("ok", True):
+                problems.append(f"{stage}: {entry.get('error', 'failed')}")
+        journal = self.pipeline.get("journal", {})
+        last_ok = journal.get("last_success")
+        if last_ok:
+            age = datetime.now() - datetime.fromisoformat(last_ok)
+            if age > timedelta(hours=JOURNAL_STALE_HOURS):
+                problems.append(f"journal: no successful run in {age.days}d {age.seconds // 3600}h")
+        return problems
 
     def summary_lines(self) -> list[str]:
         """Return human-readable status lines."""
@@ -105,6 +125,15 @@ class HealthStatus:
 
         # DB
         lines.append(f"  Database:     {'OK' if self.db_exists else 'MISSING'} ({self.db_size_mb:.1f} MB)")
+
+        # Nightly pipeline
+        if not self.pipeline:
+            lines.append("  Pipeline:     NO RUNS RECORDED")
+        elif self.pipeline_problems:
+            lines.append("  Pipeline:     FAILING")
+            lines.extend(f"    - {p}" for p in self.pipeline_problems)
+        else:
+            lines.append("  Pipeline:     OK")
 
         return lines
 
@@ -196,4 +225,5 @@ def get_health() -> HealthStatus:
         last_screenshot_time=last_screenshot_time,
         db_exists=db_exists,
         db_size_mb=db_size_mb,
+        pipeline=pipeline_status.read(),
     )

@@ -11,7 +11,8 @@ screenshot_quality = 40        # JPEG quality (1-100, lower = smaller files)
 blocked_apps = ["1Password", "Keychain Access"]
 blocked_url_patterns = ["bank", "chase.com"]
 blur_screenshots = false
-retention_days = 90
+retention_days = 90            # screenshots older than this are deleted
+event_retention_days = 0       # events/URLs; 0 = keep forever
 
 [categories]
 coding = ["VS Code", "Code", "Xcode", "Terminal", "iTerm", "PyCharm", "Cursor", "Warp"]
@@ -23,7 +24,7 @@ learning = ["Anki", "Kindle", "Books"]
 
 [ai]
 provider = "claude"                      # "claude" or "ollama"
-claude_model = "claude-sonnet-4-20250514"
+claude_model = "claude-sonnet-5-5"
 # claude_api_key = "sk-..."             # or set ANTHROPIC_API_KEY env var
 ollama_model = "llama3.1:8b"
 ollama_url = "http://localhost:11434"

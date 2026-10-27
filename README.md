@@ -184,7 +184,8 @@ screenshot_quality = 40        # JPEG quality (1-100)
 [privacy]
 blocked_apps = ["1Password", "Keychain Access"]
 blocked_url_patterns = ["bank", "chase.com"]
-retention_days = 90            # auto-delete data older than this
+retention_days = 90            # auto-delete screenshots older than this
+event_retention_days = 0       # events/URLs; 0 = keep forever (default)
 
 [categories]
 coding = ["VS Code", "Code", "Xcode", "Terminal", "iTerm", "PyCharm", "Cursor", "Warp"]
@@ -196,7 +197,7 @@ learning = ["Anki", "Kindle", "Books"]
 
 [ai]
 provider = "claude"                     # "claude" or "ollama"
-claude_model = "claude-sonnet-4-20250514"
+claude_model = "claude-sonnet-5-5"
 ollama_model = "llama3.1:8b"
 
 [obsidian]
@@ -369,7 +370,7 @@ Use absolute paths to the venv's Python so the client doesn't need your shell en
 - **Incognito safe** — Private/incognito browser windows are never recorded (no events, URLs, or screenshots)
 - **Blocklist** — Exclude sensitive apps and URLs from tracking
 - **`.env` for secrets** — API keys stored in `.env`, never committed
-- **Data retention** — Auto-deletes data older than 90 days (configurable)
+- **Data retention** — Screenshots auto-delete after 90 days; activity events are kept forever unless you set `event_retention_days`
 - **Open source** — Audit every line of code
 
 ## Storage
@@ -378,7 +379,7 @@ Use absolute paths to the venv's Python so the client doesn't need your shell en
 | ---------------- | --------------- | -------------------------------------------- |
 | Screenshots      | ~15-20 MB/day   | Downscaled to 1280px, JPEG quality 40, dedup |
 | Database         | ~1-2 MB/day     | SQLite with WAL mode                         |
-| 90-day retention | ~1.5-2 GB total | Auto-cleanup on daemon startup               |
+| 90-day retention | ~1.5-2 GB total | Screenshot cleanup runs daily                |
 
 ## Contributing
 

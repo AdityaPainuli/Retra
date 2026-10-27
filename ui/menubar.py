@@ -35,10 +35,14 @@ class RetraMenubar(rumps.App):
 
         self._recording_status = rumps.MenuItem("Recording: checking...")
         self._recording_status.set_callback(None)
+        self._pipeline_status = rumps.MenuItem("Pipeline: checking...")
+        self._pipeline_status.set_callback(None)
+        self._notified_pipeline_problems: tuple = ()
 
         # Build menu
         self.menu = [
             self._recording_status,
+            self._pipeline_status,
             None,
             rumps.MenuItem("Open Dashboard", callback=self.open_dashboard),
             None,
@@ -78,6 +82,22 @@ class RetraMenubar(rumps.App):
                 self._notified_down = True
             self._last_health_ok = False
 
+        problems = health.pipeline_problems
+        if problems:
+            self._pipeline_status.title = f"Pipeline: FAILING ({len(problems)})"
+            indicator += "!"
+            # Notify once per distinct set of problems, not every 10s tick
+            if tuple(problems) != self._notified_pipeline_problems:
+                rumps.notification(
+                    "Retra",
+                    "Nightly pipeline failing",
+                    "; ".join(problems)[:200],
+                )
+                self._notified_pipeline_problems = tuple(problems)
+        else:
+            self._pipeline_status.title = "Pipeline: OK"
+            self._notified_pipeline_problems = ()
+
         # Show focus time
         try:
             summary = self.db.compute_daily_summary(date.today())
@@ -107,7 +127,7 @@ class RetraMenubar(rumps.App):
     def show_health(self, _):
         health = get_health()
         lines = health.summary_lines()
-        overall = "ALL OK" if health.recording_ok else "NOT OK"
+        overall = "ALL OK" if health.recording_ok and not health.pipeline_problems else "NOT OK"
         msg = f"Overall: {overall}\n\n" + "\n".join(lines)
         rumps.alert(title="Retra — Recording Health", message=msg, ok="Close")
 

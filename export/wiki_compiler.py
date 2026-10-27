@@ -20,6 +20,8 @@ except ImportError:
     _ssl_context = None
 
 from config.settings import get_settings
+from export import pipeline_status
+from export.claude_retry import RETRYABLE_STREAM_ERRORS, RetryableStreamError, call_with_retries
 
 
 def _get_wiki_dir() -> Path:
@@ -89,6 +91,7 @@ def compile_daily_note(target_date: date = None):
             summary=_summarize_written(written),
         )
         print(f"[Retra] Wiki compiled for {target_date}")
+        pipeline_status.record("wiki", ok=True)
 
         # Auto weekly rollup on Sundays (weekday 6 = Sunday)
         if target_date.weekday() == 6:
@@ -99,6 +102,7 @@ def compile_daily_note(target_date: date = None):
                 print(f"[Retra] Auto weekly rollup failed: {e}")
     else:
         print(f"[Retra] Wiki compilation failed for {target_date}")
+        pipeline_status.record("wiki", ok=False)
 
 
 def compile_week(end_date: date = None):
@@ -464,11 +468,13 @@ def _call_claude(prompt: str) -> Optional[str]:
 
     if not api_key:
         print("[Retra] ANTHROPIC_API_KEY not set")
+        pipeline_status.note_error("ANTHROPIC_API_KEY not set")
         return None
 
     payload = json.dumps({
         "model": settings.ai.claude_model,
-        "max_tokens": 8192,
+        # Adaptive thinking shares this budget with the page rewrites.
+        "max_tokens": 32000,
         "stream": True,
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
@@ -487,8 +493,12 @@ def _call_claude(prompt: str) -> Optional[str]:
         method="POST",
     )
 
-    chunks: list[str] = []
-    try:
+    class _StreamError(Exception):
+        pass
+
+    def attempt() -> tuple[str, Optional[str]]:
+        chunks: list[str] = []
+        stop_reason = None
         with urllib.request.urlopen(req, timeout=600, context=_ssl_context) as resp:
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -506,15 +516,32 @@ def _call_claude(prompt: str) -> Optional[str]:
                     delta = event.get("delta") or {}
                     if delta.get("type") == "text_delta":
                         chunks.append(delta.get("text", ""))
+                elif etype == "message_delta":
+                    stop_reason = (event.get("delta") or {}).get("stop_reason") or stop_reason
                 elif etype == "error":
                     err = event.get("error") or {}
-                    print(f"[Retra] Claude API stream error: {err.get('message', err)}")
-                    return None
+                    msg = f"stream error: {err.get('message', err)}"
+                    if err.get("type") in RETRYABLE_STREAM_ERRORS:
+                        raise RetryableStreamError(msg)
+                    raise _StreamError(msg)
+        if stop_reason is None:
+            # Connection closed before message_delta: dropped, not finished.
+            raise RetryableStreamError("stream ended before the final event")
+        return "".join(chunks), stop_reason
+
+    try:
+        text, stop_reason = call_with_retries(attempt, "Wiki compile")
     except Exception as e:
         print(f"[Retra] Claude API error: {e}")
+        pipeline_status.note_error(f"Claude API: {e}")
         return None
 
-    text = "".join(chunks)
+    if stop_reason not in ("end_turn", "stop_sequence"):
+        # A cut-off or interrupted stream would write half-finished wiki pages.
+        print(f"[Retra] Claude response unusable (stop_reason={stop_reason})")
+        pipeline_status.note_error(f"Claude API: stop_reason={stop_reason}")
+        return None
+
     return text or None
 
 

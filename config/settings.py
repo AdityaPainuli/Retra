@@ -27,6 +27,7 @@ SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 DB_PATH = DATA_DIR / "retra.db"
 HEARTBEAT_PATH = DATA_DIR / "daemon.heartbeat"
 PID_PATH = DATA_DIR / "daemon.pid"
+PIPELINE_STATUS_PATH = DATA_DIR / "pipeline_status.json"
 
 
 @dataclass
@@ -43,7 +44,8 @@ class PrivacyConfig:
     blocked_apps: list[str] = field(default_factory=lambda: ["1Password", "Keychain Access"])
     blocked_url_patterns: list[str] = field(default_factory=lambda: ["bank", "chase.com"])
     blur_screenshots: bool = False
-    retention_days: int = 90
+    retention_days: int = 90  # screenshots only
+    event_retention_days: int = 0  # events/URLs/sessions; 0 = keep forever
 
 
 @dataclass
@@ -219,7 +221,7 @@ class CategoryConfig:
 @dataclass
 class AIConfig:
     provider: str = "claude"  # "claude" or "ollama"
-    claude_model: str = "claude-sonnet-4-20250514"
+    claude_model: str = "claude-sonnet-5-5"
     claude_api_key: Optional[str] = None
     ollama_model: str = "llama3.1:8b"
     ollama_url: str = "http://localhost:11434"

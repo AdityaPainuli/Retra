@@ -1007,6 +1007,7 @@ async def get_settings_api():
             "blocked_url_patterns": s.privacy.blocked_url_patterns,
             "blur_screenshots": s.privacy.blur_screenshots,
             "retention_days": s.privacy.retention_days,
+            "event_retention_days": s.privacy.event_retention_days,
         },
         "ai": {
             "provider": s.ai.provider,
