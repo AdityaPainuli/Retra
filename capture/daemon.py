@@ -10,6 +10,7 @@ import signal
 import sys
 import logging
 import sqlite3
+import subprocess
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -27,7 +28,7 @@ from capture.screenshot import ScreenshotCapture
 from capture.idle_detector import is_user_idle
 from storage.database import Database
 from storage.models import WindowEvent, Screenshot
-from config.settings import get_settings, DB_PATH, SCREENSHOTS_DIR, HEARTBEAT_PATH, PID_PATH
+from config.settings import get_settings, PROJECT_ROOT, DB_PATH, SCREENSHOTS_DIR, HEARTBEAT_PATH, PID_PATH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +72,11 @@ class CaptureDaemon:
         self._screenshots_since_start = 0
         self._last_heartbeat_time: float = 0
         self._last_maintenance_date: Optional[date] = None
+
+        # Catch-up for nightly runs missed while the Mac slept
+        self._last_catchup_check: float = 0
+        self._catchup_proc: Optional[subprocess.Popen] = None
+        self._catchup_runs: dict[date, int] = {}
 
         # Graceful shutdown
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -136,6 +142,39 @@ class CaptureDaemon:
             )
         except Exception as e:
             log.warning(f"Cleanup failed (non-fatal): {e}")
+
+    CATCHUP_CHECK_SEC = 1800
+    # Each run can cost a wiki compile (~$0.30), so cap repeats for a day
+    # whose failure isn't transient.
+    MAX_CATCHUP_RUNS_PER_DAY = 4
+
+    def _maybe_catchup(self):
+        """While the user is active (so the Mac is truly awake), rerun any
+        recent nightly stage that failed or never ran."""
+        now = time.time()
+        if now - self._last_catchup_check < self.CATCHUP_CHECK_SEC:
+            return
+        self._last_catchup_check = now
+        if self._catchup_proc and self._catchup_proc.poll() is None:
+            return
+        today = date.today()
+        if self._catchup_runs.get(today, 0) >= self.MAX_CATCHUP_RUNS_PER_DAY:
+            return
+
+        from export.catchup import pending_days
+        pending = pending_days(today)
+        if not pending:
+            return
+        self._catchup_runs[today] = self._catchup_runs.get(today, 0) + 1
+        log.info("Catch-up needed: %s", {d.isoformat(): sorted(m) for d, m in pending.items()})
+        log_path = Path.home() / "Library" / "Logs" / "retra-catchup.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as out:
+            self._catchup_proc = subprocess.Popen(
+                [sys.executable, str(PROJECT_ROOT / "main.py"), "catchup"],
+                cwd=PROJECT_ROOT, stdout=out, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
     def _write_pid(self):
         """Write PID file for process management."""
@@ -393,6 +432,9 @@ class CaptureDaemon:
                 # only run on startup.
                 if date.today() != self._last_maintenance_date:
                     self._run_maintenance()
+
+                if window:
+                    self._maybe_catchup()
 
             except Exception as e:
                 log.error(f"Capture error: {e}")

@@ -12,6 +12,7 @@ Usage:
     python main.py menubar     Start the menubar app
     python main.py journal     Generate today's Obsidian journal
     python main.py journal YYYY-MM-DD  Generate journal for a specific date
+    python main.py catchup     Redo failed/missed journal, reflection and wiki runs (last 3 days)
     python main.py compile     Compile today's daily note into wiki
     python main.py compile YYYY-MM-DD  Compile a specific date into wiki
     python main.py compile-week   Generate weekly rollup
@@ -171,6 +172,7 @@ def cmd_menubar():
 
 
 def cmd_journal(target_date: str = None):
+    from export.catchup import journal_lock
     from export.obsidian import export_to_obsidian
 
     if target_date:
@@ -178,8 +180,16 @@ def cmd_journal(target_date: str = None):
     else:
         d = date.today()
 
-    filepath = export_to_obsidian(d)
+    with journal_lock():
+        filepath = export_to_obsidian(d)
     print(f"Journal exported: {filepath}")
+
+
+def cmd_catchup():
+    from export.catchup import run_catchup
+
+    done = run_catchup()
+    print("Catch-up complete" if done else "Catch-up incomplete, will retry")
 
 
 def cmd_compile(target_date: str = None):
@@ -416,6 +426,7 @@ COMMANDS = {
     "dashboard": cmd_dashboard,
     "menubar": cmd_menubar,
     "journal": cmd_journal,
+    "catchup": cmd_catchup,
     "compile": cmd_compile,
     "compile-week": cmd_compile_week,
     "lint": cmd_lint,
