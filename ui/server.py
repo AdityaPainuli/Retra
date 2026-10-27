@@ -3,6 +3,7 @@ Retra Dashboard API
 FastAPI server that serves activity data to the React dashboard.
 """
 
+import asyncio
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,7 @@ async def get_day(date_str: str):
     summary = db.compute_daily_summary(target)
     sessions = db.aggregate_sessions(target)
     screenshots = db.get_screenshots_for_date(target)
+    url_events_raw = db.get_url_events_for_date(target)
 
     # Merge saved tags from sessions table into computed sessions
     saved = db.get_sessions_for_date(target)
@@ -55,9 +57,11 @@ async def get_day(date_str: str):
         if key in saved_tags:
             s.is_productive, s.tag = saved_tags[key]
 
-    # Detect projects from window titles
-    from export.summarizer import detect_projects
-    projects = detect_projects(summary)
+    # New: attribute time per project using project_hint anchors + context
+    # inheritance. Falls back to post-hoc title/URL parsing so historical
+    # events (captured before project_hint existed) still attribute.
+    from export.attribution import day_project_totals
+    project_totals = day_project_totals(db.get_events_for_date(target))
 
     # Group sessions by app — aggregate all Cursor sessions into one entry, etc.
     from collections import OrderedDict
@@ -112,9 +116,23 @@ async def get_day(date_str: str):
             "categories": summary.category_breakdown(),
             "ai_summary": summary.ai_summary,
             "projects": [
-                {"name": name, "minutes": mins}
-                for name, mins in sorted(projects.items(), key=lambda x: -x[1])
+                {
+                    "name": name,
+                    "minutes": v["seconds"] // 60,
+                    "direct_minutes": v["direct_seconds"] // 60,
+                    "inherited_minutes": v["inherited_seconds"] // 60,
+                }
+                for name, v in sorted(
+                    (
+                        (n, val) for n, val in project_totals.items()
+                        if n != "_unattributed" and val["seconds"] >= 60
+                    ),
+                    key=lambda kv: -kv[1]["seconds"],
+                )
             ],
+            "unattributed_minutes": (
+                project_totals.get("_unattributed", {}).get("seconds", 0) // 60
+            ),
         },
         "sessions": [
             {
@@ -132,6 +150,20 @@ async def get_day(date_str: str):
             }
             for i, g in enumerate(grouped_list)
         ],
+        # Chronological activity blocks (not grouped by app) for Replay,
+        # which needs real start/end times rather than first/last use.
+        "timeline": [
+            {
+                "start_time": s.start_time.isoformat(),
+                "end_time": s.end_time.isoformat(),
+                "app_name": s.app_name,
+                "category": s.category,
+                "duration_seconds": s.duration_seconds,
+                "window_titles": s.window_titles[:5],
+                "domains": s.domains[:5],
+            }
+            for s in sorted(sessions, key=lambda s: s.start_time)
+        ],
         "screenshots": [
             {
                 "id": sc.id,
@@ -141,6 +173,18 @@ async def get_day(date_str: str):
                 "window_title": sc.window_title,
             }
             for sc in screenshots
+        ],
+        # Lightweight URL events feed for the Replay page to enrich
+        # screenshot overlays. Trimmed fields, ordered by timestamp.
+        "url_events": [
+            {
+                "timestamp": e["timestamp"],
+                "url": e.get("url", ""),
+                "domain": e.get("domain", ""),
+                "page_title": e.get("page_title", ""),
+                "category": e.get("category", ""),
+            }
+            for e in url_events_raw
         ],
     }
 
@@ -233,6 +277,66 @@ async def get_week(end_date: str = Query(default=None)):
 
 
 # ── AI Summary ────────────────────────────────────────────────────
+
+# ── Replay Narrative ──────────────────────────────────────────────
+
+NARRATIVE_CACHE_DIR = DB_PATH.parent / "narratives"
+
+
+def _narrative_cache_path(target: date) -> Path:
+    NARRATIVE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return NARRATIVE_CACHE_DIR / f"{target.isoformat()}.json"
+
+
+@app.get("/api/narrative/{date_str}")
+async def get_narrative(date_str: str):
+    """Return cached narrative beats for a day. {beats: [...] | null}."""
+    try:
+        target = date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format.")
+    cache = _narrative_cache_path(target)
+    if not cache.exists():
+        return {"date": date_str, "beats": None, "cached": False}
+    try:
+        data = json.loads(cache.read_text())
+        return {
+            "date": date_str,
+            "beats": data.get("beats"),
+            "generated_at": data.get("generated_at"),
+            "cached": True,
+        }
+    except Exception:
+        return {"date": date_str, "beats": None, "cached": False}
+
+
+@app.post("/api/narrative/{date_str}")
+async def create_narrative(date_str: str):
+    """Generate (or regenerate) replay narrative for a day."""
+    from export.summarizer import generate_narrative
+    try:
+        target = date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format.")
+
+    summary = db.compute_daily_summary(target)
+    if summary.total_tracked_minutes < 15:
+        raise HTTPException(400, "Not enough activity to narrate this day.")
+
+    # Blocking HTTP call (up to 180s); keep it off the event loop.
+    beats = await asyncio.to_thread(generate_narrative, summary)
+    if not beats:
+        raise HTTPException(500, "Narrative generation failed.")
+
+    cache = _narrative_cache_path(target)
+    payload = {
+        "date": date_str,
+        "generated_at": datetime.now().isoformat(),
+        "beats": beats,
+    }
+    cache.write_text(json.dumps(payload, indent=2))
+    return {**payload, "cached": True}
+
 
 @app.post("/api/summarize/{date_str}")
 async def create_summary(date_str: str):
@@ -331,13 +435,15 @@ async def wiki_compile_status():
     log_content = log_path.read_text(encoding="utf-8")
 
     # Extract dates from log entries like "## [2026-04-06] ingest | Daily note for 2026-04-06"
-    compiled_dates = re.findall(r'\[(\d{4}-\d{2}-\d{2})\] ingest', log_content)
+    # or the newer "## [2026-04-06 23:00] ingest".
+    # Log entries are prepended (newest first), so sort to find the actual latest.
+    compiled_dates = re.findall(r'\[(\d{4}-\d{2}-\d{2})(?: \d{2}:\d{2})?\] ingest', log_content)
     today = date.today().isoformat()
 
     return {
         "initialized": True,
         "compiled_dates": compiled_dates,
-        "last_compiled": compiled_dates[-1] if compiled_dates else None,
+        "last_compiled": max(compiled_dates) if compiled_dates else None,
         "today_compiled": today in compiled_dates,
     }
 
@@ -754,8 +860,7 @@ async def get_url_stats(date_str: str):
             prev_domain = domain
 
     # 6. Productivity split
-    from config.settings import get_settings
-    productive_cats = get_settings().categories.PRODUCTIVE_CATEGORIES
+    productive_cats = settings.categories.PRODUCTIVE_CATEGORIES
     distraction_cats = {"entertainment"}
     neutral_cats = {"browsing", "communication", "other"}
     productive_secs = sum(s for c, s in cat_time.items() if c in productive_cats)
@@ -837,18 +942,23 @@ async def get_insights(days: int = Query(default=30)):
         if mins > 0
     ]
 
-    # Top apps from sessions (aggregate across all days in range)
-    app_minutes: dict[str, int] = {}
+    # Top apps from sessions (aggregate across all days in range).
+    # Accumulate in seconds then divide once — per-session // 60 loses the
+    # fractional minute on every one of N sessions (same bug we fixed in
+    # compute_daily_summary).
+    app_seconds: dict[str, int] = {}
     for day_offset in range(days):
         d = start + timedelta(days=day_offset)
         sessions = db.aggregate_sessions(d)
         for sess in sessions:
             if sess.category != "idle":
-                app_minutes[sess.app_name] = app_minutes.get(sess.app_name, 0) + (sess.duration_seconds // 60)
+                app_seconds[sess.app_name] = (
+                    app_seconds.get(sess.app_name, 0) + sess.duration_seconds
+                )
 
     app_usage = [
-        {"name": name, "minutes": mins}
-        for name, mins in sorted(app_minutes.items(), key=lambda x: -x[1])
+        {"name": name, "minutes": secs // 60}
+        for name, secs in sorted(app_seconds.items(), key=lambda x: -x[1])
     ]
 
     # Comparison: current half vs previous half

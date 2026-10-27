@@ -115,75 +115,140 @@ def _build_activity_summary(summary: DailySummary) -> str:
 
 def detect_projects(summary: DailySummary) -> dict[str, int]:
     """Extract project names from window titles across all sessions.
-    Returns {project_name: estimated_minutes}."""
+    Returns {project_name: estimated_minutes}.
+
+    Only emits things that *look like* repos/paths/branches — never bare
+    English words from arbitrary title fragments.
+    """
     import re
-    projects: dict[str, int] = {}
+    # Accumulate in SECONDS — per-session // 60 loses fractional minutes
+    # on every session, undercounting projects that appear in many short
+    # sessions (the common context-switching case).
+    project_seconds: dict[str, int] = {}
+
+    # Pattern 1 (editor titles): require a file extension before the em-dash,
+    #   AND a project token that looks like a slug (>=3 chars, includes a
+    #   hyphen, dot, underscore, or digit — not a plain English word).
+    #   Matches: "report2.md — presentation-generator", "main.py — chatty-cortex"
+    #   Rejects: "Untitled — YouTube", "Free Time — Brave Browser"
+    editor_re = re.compile(
+        r'\b[\w-]+\.[a-zA-Z0-9]{1,6}\s*—\s*'                    # filename.ext —
+        r'([a-z][a-z0-9]*(?:[-_.][a-z0-9]+)+|[a-z]{4,}-[a-z0-9-]+)',
+        re.IGNORECASE,
+    )
+
+    # Pattern 4 (terminal cwd): only well-known dev parent dirs, child must be
+    # a real slug (>=3 chars, contains hyphen/digit/dot OR is in a known repo
+    # whitelist). Rejects "/Desktop/Free", "/Desktop/Watch", etc.
+    cwd_re = re.compile(
+        r'[~/](?:projects?|repos?|src|code|work|Documents/work)/([a-zA-Z0-9][\w.-]{2,})'
+    )
 
     for session in summary.sessions:
-        if session.category == "idle":
+        if session.category == "idle" or session.duration_seconds <= 0:
             continue
 
-        session_mins = session.duration_seconds // 60
-        if session_mins < 1:
-            continue
+        session_secs = session.duration_seconds
 
         for title in session.window_titles:
-            # Pattern 1: "filename.ext — project-name" (VS Code, Cursor style)
-            # Also handles "filename.ext — project-name — Editor"
-            m = re.search(r'—\s*([a-zA-Z0-9][\w.-]*(?:[\w.-]+))', title)
-            if m:
+            for m in editor_re.finditer(title):
                 proj = m.group(1).strip()
-                # Skip generic names
-                if proj.lower() not in _SKIP_PROJECTS and len(proj) > 1:
-                    projects[proj] = projects.get(proj, 0) + session_mins
+                if _is_real_project_name(proj):
+                    project_seconds[proj] = project_seconds.get(proj, 0) + session_secs
 
             # Pattern 2: GitHub/GitLab URLs "owner/repo"
             m = re.search(r'github\.com/([a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)', title)
             if m:
-                projects[m.group(1)] = projects.get(m.group(1), 0) + session_mins
+                proj = m.group(1).rstrip("/")
+                # Strip ".git" suffix for cleaner names
+                if proj.endswith(".git"):
+                    proj = proj[:-4]
+                project_seconds[proj] = project_seconds.get(proj, 0) + session_secs
 
-            # Pattern 3: "branch-name" in terminal titles like "git:(feature/xyz)"
+            # Pattern 3: feature branches in terminal — only non-trivial ones
             m = re.search(r'git:\(([^)]+)\)', title)
             if m:
                 branch = m.group(1)
-                if branch not in ("main", "master", "develop", "dev"):
-                    projects[f"branch:{branch}"] = projects.get(f"branch:{branch}", 0) + session_mins
+                if branch not in ("main", "master", "develop", "dev", "trunk"):
+                    key = f"branch:{branch}"
+                    project_seconds[key] = project_seconds.get(key, 0) + session_secs
 
-            # Pattern 4: Terminal with path "~/projects/myapp" or "user@host:~/myapp"
-            m = re.search(r'[~/](?:projects?|repos?|src|code|Desktop)/([a-zA-Z0-9_.-]+)', title)
-            if m:
+            for m in cwd_re.finditer(title):
                 proj = m.group(1)
-                if proj.lower() not in _SKIP_PROJECTS and len(proj) > 1:
-                    projects[proj] = projects.get(proj, 0) + session_mins
+                if _is_real_project_name(proj):
+                    project_seconds[proj] = project_seconds.get(proj, 0) + session_secs
 
     # Deduplicate: if "retra" and "Desktop/retra" both exist, merge
-    merged: dict[str, int] = {}
-    for proj, mins in projects.items():
+    merged_secs: dict[str, int] = {}
+    for proj, secs in project_seconds.items():
         # Normalize: strip prefixes, lowercase for comparison
         base = proj.split("/")[-1].lower().strip(".")
-        if base in _SKIP_PROJECTS or len(base) <= 1:
+        # Validate the original key: "acme/retra" is a strong repo signal even
+        # though its bare base "retra" would fail the English-word check.
+        if base in _SKIP_PROJECTS or not _is_real_project_name(proj):
             continue
         # Use the original casing of the longest key
         existing = None
-        for k in merged:
+        for k in merged_secs:
             if k.split("/")[-1].lower().strip(".") == base:
                 existing = k
                 break
         if existing:
-            merged[existing] += mins
+            merged_secs[existing] += secs
         else:
-            merged[proj] = mins
+            merged_secs[proj] = secs
 
-    return merged
+    # Convert to minutes once at the end. Drop sub-minute projects to keep
+    # output readable, matching the prior < 1 min skip behavior.
+    return {p: s // 60 for p, s in merged_secs.items() if s >= 60}
 
 
+# Words that frequently appear after em-dashes in YouTube/article/Linear titles
+# but never indicate a project. Lowercase comparison.
 _SKIP_PROJECTS = {
+    # IDE chrome
     "settings", "extensions", "output", "terminal", "debug",
     "editor", "welcome", "untitled", "workspace", "window",
     "tab", "file", "folder", "code", "cursor", "vscode",
     "new", "open", "save", "close", "search", "replace",
     "working tree", "source control", "problems", "git",
+    # Common YouTube / article / browser title noise
+    "youtube", "youtu.be", "google search", "duckduckgo",
+    "claude", "chatgpt", "gemini", "perplexity", "copilot",
+    "loading", "home", "inbox", "calendar", "linear", "linkedin",
+    "slack", "discord", "messages", "mail", "gmail",
+    "netmirror", "netflix", "spotify", "twitch", "reddit",
+    # Generic English nouns that show up as title fragments
+    "free", "love", "your", "the", "watch", "travel", "consume",
+    "mario", "play", "stop", "next", "previous", "page", "video",
+    "audio", "image", "photo", "song", "track", "movie", "show",
+    "deal", "plans", "team", "upload", "validate", "recall",
+    "headless", "simple", "id", "professional", "onboarding",
+    "dav", "tejas", "louis", "external", "externa", "consume",
+    "ai", "ml", "qa", "ui", "ux", "api", "db", "os",
 }
+
+
+_ENGLISH_WORD_RE = __import__("re").compile(r"^[a-z]+$")
+
+
+def _is_real_project_name(name: str) -> bool:
+    """Heuristic: looks like a real project slug, not a bare English word."""
+    if not name or len(name) < 3:
+        return False
+    n = name.lower().strip(".")
+    if n in _SKIP_PROJECTS:
+        return False
+    # Branch:foo, owner/repo, kebab-case, snake_case, has digits or dots
+    if "/" in name or "-" in name or "_" in name or "." in name:
+        return True
+    if any(c.isdigit() for c in name):
+        return True
+    # Bare English word with no separators → reject. This kills "Free",
+    # "Watch", "Mario", "The", "Headless", "Slack", etc.
+    if _ENGLISH_WORD_RE.match(n):
+        return False
+    return True
 
 
 def summarize_with_claude(summary: DailySummary) -> Optional[str]:
@@ -269,3 +334,122 @@ def generate_summary(summary: DailySummary) -> Optional[str]:
     else:
         print(f"[Retra] Unknown AI provider: {settings.ai.provider}")
         return None
+
+
+# ── Replay-page narrative ────────────────────────────────────────────────────
+
+NARRATIVE_PROMPT = """You are narrating someone's day, replay-style, from their captured
+activity. Produce a *timeline of short beats* — each beat is one sentence
+describing what happened in a stretch of the day, anchored to a wall-clock
+time. The reader will scrub through screenshots; your beats will pop up
+as captions when their playback time matches the beat time.
+
+Rules:
+- 8–18 beats total. Cover the whole day's active periods proportionally.
+- One sentence per beat. Concrete, specific, second-person ("you").
+- Reference real apps, websites, repos, or projects from the data — never
+  invent details that aren't there.
+- Avoid platitudes ("you were productive"). Say *what* happened.
+- Don't moralize. No "good job" or "consider taking breaks."
+- Cluster brief idle/interrupt periods into surrounding beats; don't make
+  a beat for every micro-switch.
+
+Output ONLY a JSON array, no prose. Each element:
+  {{"time": "HH:MM", "text": "..." }}
+
+Activity data:
+{activity_data}
+"""
+
+
+def _generate_narrative_with_claude(summary: DailySummary) -> Optional[list[dict]]:
+    """Call Claude to produce timestamped narrative beats. Returns list or None."""
+    settings = get_settings()
+    api_key = settings.ai.claude_api_key
+    if not api_key:
+        return None
+
+    activity_data = _build_activity_summary(summary)
+    prompt = NARRATIVE_PROMPT.format(activity_data=activity_data)
+
+    payload = json.dumps({
+        "model": settings.ai.claude_model,
+        "max_tokens": 2048,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload, headers=headers, method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=45, context=_ssl_context) as resp:
+            data = json.loads(resp.read().decode())
+            if not data.get("content"):
+                return None
+            raw = data["content"][0]["text"].strip()
+    except Exception as e:
+        print(f"[Retra] Narrative Claude error: {e}")
+        return None
+
+    # Strip possible markdown fences
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip("` \n")
+
+    try:
+        beats = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[Retra] Narrative parse failed; raw={raw[:200]}")
+        return None
+    # Sometimes the model wraps the array in an object
+    if isinstance(beats, dict):
+        beats = beats.get("beats") or beats.get("timeline") or []
+    if not isinstance(beats, list):
+        print(f"[Retra] Narrative has unexpected shape; raw={raw[:200]}")
+        return None
+
+    cleaned: list[dict] = []
+    for b in beats:
+        if not isinstance(b, dict):
+            continue
+        t = str(b.get("time", "")).strip()
+        text = str(b.get("text", "")).strip()
+        if not t or not text:
+            continue
+        # Lightly validate HH:MM
+        parts = t.split(":")
+        if len(parts) != 2:
+            continue
+        try:
+            hh = int(parts[0])
+            mm = int(parts[1])
+            if not (0 <= hh < 24 and 0 <= mm < 60):
+                continue
+        except ValueError:
+            continue
+        cleaned.append({"time": f"{hh:02d}:{mm:02d}", "text": text})
+
+    cleaned.sort(key=lambda b: b["time"])
+    return cleaned or None
+
+
+def generate_narrative(summary: DailySummary) -> Optional[list[dict]]:
+    """Generate replay-style narrative beats for a day.
+
+    Returns a list of {"time": "HH:MM", "text": "..."} beats, sorted by
+    time, or None if generation failed. Currently Claude-only (Ollama
+    JSON output reliability isn't worth the failure modes here yet).
+    """
+    settings = get_settings()
+    if settings.ai.provider != "claude":
+        print(f"[Retra] Narrative not yet supported for provider={settings.ai.provider}")
+        return None
+    return _generate_narrative_with_claude(summary)

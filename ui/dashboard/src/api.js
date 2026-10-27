@@ -31,6 +31,10 @@ export const api = {
   // AI summary
   generateSummary: (date) => request(`/summarize/${date}`, { method: 'POST' }),
 
+  // Replay narrative (timestamped beats synced to playback)
+  getNarrative: (date) => request(`/narrative/${date}`),
+  generateNarrative: (date) => request(`/narrative/${date}`, { method: 'POST' }),
+
   // Obsidian export
   exportJournal: (date) => request(`/export/${date}`, { method: 'POST' }),
 

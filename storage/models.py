@@ -17,6 +17,11 @@ class WindowEvent:
     bundle_id: Optional[str] = None
     url: Optional[str] = None
     is_idle: bool = False
+    # Best-effort project signal captured at event time — e.g. "retra" from a
+    # terminal cwd, "owner/repo" from a github tab, or None when ambiguous.
+    # The attribution pass uses these as anchor points; unanchored events
+    # inherit from the nearest anchor within a context window.
+    project_hint: Optional[str] = None
     id: Optional[int] = None
 
 
@@ -78,7 +83,9 @@ class DailySummary:
 
     @property
     def active_minutes(self) -> int:
-        return self.total_tracked_minutes - self.idle_minutes
+        # total_tracked_minutes is already idle-free (aggregate_sessions drops
+        # idle sessions), so subtracting idle_minutes would count it twice.
+        return self.total_tracked_minutes
 
     @property
     def focus_percentage(self) -> int:

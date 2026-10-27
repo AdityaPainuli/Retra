@@ -50,10 +50,14 @@ CATEGORY_LABELS = {
 def generate_daily_note(
     target_date: Optional[date] = None,
     include_ai_summary: bool = True,
+    prefer_cached_ai: bool = True,
 ) -> str:
     """
     Generate a full Obsidian daily note for the given date.
     Returns the markdown content as a string.
+
+    prefer_cached_ai: if True, use the previously-saved AI summary from the DB
+    instead of calling Claude API again. Set False to force regeneration.
     """
     if target_date is None:
         target_date = date.today()
@@ -61,13 +65,17 @@ def generate_daily_note(
     db = Database(DB_PATH)
     summary = db.compute_daily_summary(target_date)
 
-    # Generate AI reflection if requested
     ai_text = None
-    if include_ai_summary and summary.total_tracked_minutes > 30:
-        ai_text = generate_summary(summary)
-        if ai_text:
-            summary.ai_summary = ai_text
-            db.save_daily_summary(summary)
+    if include_ai_summary:
+        # Prefer cached — compute_daily_summary already loaded it into
+        # summary.ai_summary if one exists in the daily_summaries table.
+        if prefer_cached_ai and summary.ai_summary:
+            ai_text = summary.ai_summary
+        elif summary.total_tracked_minutes > 30:
+            ai_text = generate_summary(summary)
+            if ai_text:
+                summary.ai_summary = ai_text
+                db.save_daily_summary(summary)
 
     projects = detect_projects(summary)
     domains = _extract_domains(summary.sessions)
@@ -235,15 +243,20 @@ def _fmt_min(minutes: int) -> str:
 
 
 def _extract_domains(sessions: list[Session]) -> dict[str, int]:
-    """Extract domains from sessions and estimate minutes per domain."""
-    domain_mins: dict[str, int] = {}
+    """Extract domains from sessions and estimate minutes per domain.
+
+    Splits each session's seconds evenly across its observed domains, then
+    converts to minutes once at the end. The prior code divided minutes
+    per session, losing fractional minutes on every browse session.
+    """
+    domain_secs: dict[str, int] = {}
     for s in sessions:
-        if not s.domains:
+        if not s.domains or s.duration_seconds <= 0:
             continue
-        per_domain = max(s.duration_seconds // 60, 1) // len(s.domains)
+        per_domain = s.duration_seconds // len(s.domains)
         for d in s.domains:
-            domain_mins[d] = domain_mins.get(d, 0) + per_domain
-    return domain_mins
+            domain_secs[d] = domain_secs.get(d, 0) + per_domain
+    return {d: secs // 60 for d, secs in domain_secs.items()}
 
 
 # ── Linked note generators ──
@@ -390,8 +403,18 @@ def _safe_filename(name: str) -> str:
     return name.replace("/", "-").replace("\\", "-").replace(":", "-").replace(".", "_")
 
 
-def export_to_obsidian(target_date: Optional[date] = None):
-    """Generate and write the daily note + linked notes to the Obsidian vault."""
+def export_to_obsidian(
+    target_date: Optional[date] = None,
+    compile_wiki: bool = True,
+    prefer_cached_ai: bool = True,
+):
+    """Generate and write the daily note + linked notes to the Obsidian vault.
+
+    compile_wiki: if False, skip the LLM wiki compile step. Use this for
+    bulk historical re-exports so no Claude API calls happen.
+    prefer_cached_ai: passed to generate_daily_note — when True, reuses the
+    cached AI reflection from the DB instead of regenerating.
+    """
     settings = get_settings()
     if target_date is None:
         target_date = date.today()
@@ -401,10 +424,12 @@ def export_to_obsidian(target_date: Optional[date] = None):
     projects = detect_projects(summary)
     domains = _extract_domains(summary.sessions)
 
-    # Generate the markdown
-    content = generate_daily_note(target_date)
+    content = generate_daily_note(
+        target_date,
+        include_ai_summary=True,
+        prefer_cached_ai=prefer_cached_ai,
+    )
 
-    # Write to vault
     output_dir = settings.obsidian.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -413,7 +438,8 @@ def export_to_obsidian(target_date: Optional[date] = None):
     filepath = output_dir / filename
     filepath.write_text(content, encoding="utf-8")
 
-    # Generate linked notes for graph connectivity
+    # Generate linked notes for graph connectivity (idempotent — only appends
+    # the daily link if not already present).
     seen_apps = set()
     for s in summary.sessions:
         if s.app_name not in seen_apps and s.category != "idle":
@@ -433,11 +459,11 @@ def export_to_obsidian(target_date: Optional[date] = None):
 
     print(f"[Retra] Journal exported to: {filepath}")
 
-    # Auto-compile into wiki
-    try:
-        from export.wiki_compiler import compile_daily_note
-        compile_daily_note(target_date)
-    except Exception as e:
-        print(f"[Retra] Wiki compile skipped: {e}")
+    if compile_wiki:
+        try:
+            from export.wiki_compiler import compile_daily_note
+            compile_daily_note(target_date)
+        except Exception as e:
+            print(f"[Retra] Wiki compile skipped: {e}")
 
     return filepath
