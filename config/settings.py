@@ -43,9 +43,15 @@ class CaptureConfig:
 class PrivacyConfig:
     blocked_apps: list[str] = field(default_factory=lambda: ["1Password", "Keychain Access"])
     blocked_url_patterns: list[str] = field(default_factory=lambda: ["bank", "chase.com"])
+    # Still tracked as activity, but never screenshotted (private conversations).
+    screenshot_skip_apps: list[str] = field(default_factory=lambda: [
+        "Messages", "WhatsApp", "Signal", "Telegram", "FaceTime",
+        "Passwords", "System Settings",
+    ])
     blur_screenshots: bool = False
-    retention_days: int = 90  # screenshots only
-    event_retention_days: int = 0  # events/URLs/sessions; 0 = keep forever
+    # Screenshot images only. Their text is kept as activity (event_retention_days).
+    retention_days: int = 2
+    event_retention_days: int = 0  # events/URLs/sessions/screen text; 0 = keep forever
 
 
 @dataclass

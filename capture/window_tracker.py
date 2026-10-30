@@ -18,6 +18,9 @@ class ActiveWindow:
     window_title: str
     bundle_id: Optional[str] = None
     url: Optional[str] = None
+    # CGWindowID, used to screenshot just this window. None from the
+    # AppleScript fallback, which can't see window ids.
+    window_id: Optional[int] = None
 
 
 def get_active_window_applescript() -> Optional[ActiveWindow]:
@@ -103,6 +106,7 @@ def get_active_window_pyobjc() -> Optional[ActiveWindow]:
             owner_name = window.get("kCGWindowOwnerName", "")
             window_title = window.get("kCGWindowName", "")
             owner_pid = window.get("kCGWindowOwnerPID", 0)
+            window_id = window.get("kCGWindowNumber")
 
             if not owner_name:
                 continue
@@ -123,6 +127,7 @@ def get_active_window_pyobjc() -> Optional[ActiveWindow]:
                 window_title=window_title,
                 bundle_id=bundle_id,
                 url=url,
+                window_id=window_id,
             )
 
         return None
@@ -599,3 +604,21 @@ def is_screen_locked() -> bool:
         except Exception:
             pass
     return False
+
+
+_carbon = None
+
+
+def is_secure_input_active() -> bool:
+    """True while some app has Secure Event Input on, which macOS does while a
+    password field has focus (and some apps, like Terminal's Secure Keyboard
+    Entry, leave on). Treated as "a password may be on screen"."""
+    global _carbon
+    try:
+        if _carbon is None:
+            import ctypes
+            _carbon = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+            _carbon.IsSecureEventInputEnabled.restype = ctypes.c_bool
+        return bool(_carbon.IsSecureEventInputEnabled())
+    except Exception:
+        return False

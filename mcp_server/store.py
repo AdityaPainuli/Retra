@@ -126,6 +126,22 @@ class ReadOnlyDatabase(Database):
             m["last_seen"] = max(m["last_seen"], r["last_seen"])
         return sorted(merged.values(), key=lambda m: m["last_seen"], reverse=True)[:limit]
 
+    def search_screen_text(self, match: str, start: datetime, end: datetime,
+                           limit: int) -> list[dict]:
+        """Full-text search over the (already redacted) text read from
+        screenshots, best matches first."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT s.timestamp, s.app_name, s.window_title,
+                       snippet(screen_text_fts, 0, '[', ']', '…', 24) AS snippet
+                FROM screen_text_fts
+                JOIN screenshots s ON s.id = screen_text_fts.rowid
+                WHERE screen_text_fts MATCH ? AND s.timestamp >= ? AND s.timestamp < ?
+                ORDER BY bm25(screen_text_fts)
+                LIMIT ?
+            """, (match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
+        return [dict(r) for r in rows if not is_private(r["app_name"], r["window_title"] or "")][:limit]
+
 
 def db_path() -> Path:
     return Path(os.environ.get("RETRA_DB_PATH") or DB_PATH)

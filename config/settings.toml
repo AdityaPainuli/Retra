@@ -10,9 +10,11 @@ screenshot_quality = 40        # JPEG quality (1-100, lower = smaller files)
 [privacy]
 blocked_apps = ["1Password", "Keychain Access"]
 blocked_url_patterns = ["bank", "chase.com"]
+# Tracked as activity but never screenshotted
+screenshot_skip_apps = ["Messages", "WhatsApp", "Signal", "Telegram", "FaceTime", "Passwords", "System Settings"]
 blur_screenshots = false
-retention_days = 90            # screenshots older than this are deleted
-event_retention_days = 0       # events/URLs; 0 = keep forever
+retention_days = 2             # screenshot images are deleted after this (their text is kept)
+event_retention_days = 0       # events/URLs/screen text; 0 = keep forever
 
 [categories]
 coding = ["VS Code", "Code", "Xcode", "Terminal", "iTerm", "PyCharm", "Cursor", "Warp"]

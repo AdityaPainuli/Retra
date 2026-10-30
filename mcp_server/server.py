@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import functools
 import json
+import re
+import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -34,8 +36,9 @@ mcp = MCPServer(
         "Retra is the user's local activity tracker (apps, window titles, URLs, "
         "projects). Use current_activity for 'what am I doing now', recent_work "
         "or list_projects for 'what have I been working on', day_summary for a "
-        "specific day, search_activity to find when something was worked on, and "
-        "wiki_page for the long-term notes compiled from daily activity. Times "
+        "specific day, search_activity to find when something was worked on, "
+        "search_screen_text to find what was on screen (text read from "
+        "screenshots), and wiki_page for the long-term notes compiled from daily activity. Times "
         "are local; durations are in minutes."
     ),
 )
@@ -218,6 +221,45 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
         "days": [{"date": d, "minutes": minutes(s)} for d, s in sorted(by_day.items(), reverse=True)][:30],
         "hits": hits,
         "pages": pages,
+    }
+
+
+@tool
+def search_screen_text(query: str, since: Optional[str] = None, until: Optional[str] = None,
+                       limit: int = 15) -> dict:
+    """Search the text that was visible on screen (read on-device from
+    screenshots of the active window, with secrets masked). Use for 'where did
+    I see X' or to recover what a page/doc/error said. All words must appear;
+    `since`/`until` work like search_activity (default last 30 days). Returns
+    matches best first with a snippet; [brackets] mark the matched words."""
+    words = re.findall(r"\w+", query)
+    if not words:
+        return {"error": "query is empty"}
+    limit = max(1, min(limit, 40))
+    end = parse_when(until, datetime.now() + timedelta(seconds=1))
+    if until and len(until.strip()) == 10:
+        end += timedelta(days=1)
+    start = parse_when(since, _start_of(date.today() - timedelta(days=29)))
+
+    # Quote each word so FTS operators in the query are taken literally.
+    match = " ".join(f'"{w}"' for w in words)
+    try:
+        rows = get_db().search_screen_text(match, start, end, limit)
+    except sqlite3.OperationalError:
+        return {"error": "screen text isn't available yet (capture daemon hasn't run the upgrade)"}
+
+    return {
+        "query": query,
+        "range": f"{start.date().isoformat()} to {end.date().isoformat()}",
+        "hits": [
+            {
+                "when": r["timestamp"][:16].replace("T", " "),
+                "app": r["app_name"],
+                "title": short(r["window_title"]),
+                "text": redact_text(r["snippet"]),
+            }
+            for r in rows
+        ],
     }
 
 

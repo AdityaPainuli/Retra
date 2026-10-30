@@ -481,10 +481,10 @@ function GeneralTab({ settings, update }) {
       </Section>
 
       <Section title="Data Retention" description="How long to keep historical data before auto-cleanup.">
-        <Field label="Screenshot retention (days)" hint="Screenshots older than this are deleted. Cleanup runs daily.">
-          <NumberInput value={settings.privacy?.retention_days} onChange={(v) => update('privacy', 'retention_days', v)} min={7} max={365} />
+        <Field label="Screenshot image retention (days)" hint="Screenshot images older than this are deleted. Their extracted text is kept with your activity.">
+          <NumberInput value={settings.privacy?.retention_days} onChange={(v) => update('privacy', 'retention_days', v)} min={1} max={365} />
         </Field>
-        <Field label="Activity retention (days)" hint="Window events, URLs, and sessions older than this are deleted. 0 keeps them forever.">
+        <Field label="Activity retention (days)" hint="Window events, URLs, sessions, and screen text older than this are deleted. 0 keeps them forever.">
           <NumberInput value={settings.privacy?.event_retention_days} onChange={(v) => update('privacy', 'event_retention_days', v)} min={0} max={3650} />
         </Field>
       </Section>
@@ -534,6 +534,14 @@ function PrivacyTab({ settings, update }) {
   function addBlockedApp(app) {
     update('privacy', 'blocked_apps', [...(settings.privacy.blocked_apps || []), app]);
   }
+  function removeSkipApp(i) {
+    const next = [...settings.privacy.screenshot_skip_apps];
+    next.splice(i, 1);
+    update('privacy', 'screenshot_skip_apps', next);
+  }
+  function addSkipApp(app) {
+    update('privacy', 'screenshot_skip_apps', [...(settings.privacy.screenshot_skip_apps || []), app]);
+  }
   function removeBlockedUrl(i) {
     const next = [...settings.privacy.blocked_url_patterns];
     next.splice(i, 1);
@@ -553,7 +561,8 @@ function PrivacyTab({ settings, update }) {
         <TagList tags={settings.privacy?.blocked_url_patterns} onRemove={removeBlockedUrl} onAdd={addBlockedUrl} />
       </Section>
 
-      <Section title="Screenshots">
+      <Section title="Screenshots" description="Only the active window is captured, never while a password field is focused. These apps are still tracked but never screenshotted.">
+        <TagList tags={settings.privacy?.screenshot_skip_apps} onRemove={removeSkipApp} onAdd={addSkipApp} />
         <Toggle
           checked={settings.privacy?.blur_screenshots ?? false}
           onChange={(v) => update('privacy', 'blur_screenshots', v)}

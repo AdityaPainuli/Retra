@@ -59,6 +59,7 @@ class Screenshot:
     app_name: str
     window_title: str
     thumbnail_path: Optional[str] = None
+    ocr_text: Optional[str] = None
     id: Optional[int] = None
 
 

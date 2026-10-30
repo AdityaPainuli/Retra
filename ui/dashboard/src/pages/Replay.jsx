@@ -197,11 +197,18 @@ export default function Replay() {
             <div className="relative bg-[var(--color-surface)] rounded-xl border border-[var(--color-border)] overflow-hidden">
               {shot ? (
                 <>
-                  <img
-                    src={api.getScreenshotUrl(shot.id)}
-                    alt={`Screenshot at ${shot.timestamp}`}
-                    className="w-full h-auto max-h-[55vh] object-contain bg-black"
-                  />
+                  {shot.has_image ? (
+                    <img
+                      src={api.getScreenshotUrl(shot.id)}
+                      alt={`Screenshot at ${shot.timestamp}`}
+                      className="w-full h-auto max-h-[55vh] object-contain bg-black"
+                    />
+                  ) : (
+                    // Image deleted after retention: show the text read from it
+                    <pre className="h-[55vh] overflow-y-auto p-4 pb-20 bg-black text-white/80 text-xs font-mono whitespace-pre-wrap">
+                      {shot.screen_text || 'Image deleted. No text was found on this screen.'}
+                    </pre>
+                  )}
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-3">
                     <div className="flex items-center justify-between text-white">
                       <div>
@@ -317,12 +324,18 @@ export default function Replay() {
                       : 'border-transparent hover:border-[var(--color-border)]'
                   }`}
                 >
-                  <img
-                    src={api.getScreenshotUrl(sc.id)}
-                    alt=""
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
+                  {sc.has_image ? (
+                    <img
+                      src={api.getScreenshotUrl(sc.id)}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-[var(--color-surface-2)] text-[8px] leading-tight text-[var(--color-text-muted)] p-0.5 overflow-hidden text-left">
+                      {sc.app_name}
+                    </div>
+                  )}
                 </button>
               ))}
             </div>
