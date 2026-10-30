@@ -133,13 +133,13 @@ class ReadOnlyDatabase(Database):
         with self._conn() as conn:
             rows = conn.execute("""
                 SELECT s.timestamp, s.app_name, s.window_title,
-                       snippet(screen_text_fts, 0, '[', ']', '…', 24) AS snippet
+                       snippet(screen_text_fts, 0, ?, ?, '…', 24) AS snippet
                 FROM screen_text_fts
                 JOIN screenshots s ON s.id = screen_text_fts.rowid
                 WHERE screen_text_fts MATCH ? AND s.timestamp >= ? AND s.timestamp < ?
                 ORDER BY bm25(screen_text_fts)
                 LIMIT ?
-            """, (match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
+            """, (HL_START, HL_END, match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
         return [dict(r) for r in rows if not is_private(r["app_name"], r["window_title"] or "")][:limit]
 
 
@@ -168,6 +168,27 @@ def is_private(app: str, title: str = "", url: str = "") -> bool:
         return True
     hay = f"{title or ''} {url or ''}".lower()
     return any(p.lower() in hay for p in privacy.blocked_url_patterns)
+
+
+# Snippet highlight markers. Control characters, so privacy patterns can be
+# matched on the plain text before they become visible [brackets].
+HL_START, HL_END = "\x02", "\x03"
+
+
+def redact_highlighted(text: str) -> str:
+    """redact_text for a highlighted snippet: lines are judged without the
+    markers (so "[chase].com" can't slip past "chase.com"), then the markers
+    are shown as [brackets]."""
+    kept, removed = [], 0
+    for line in text.splitlines():
+        plain = line.replace(HL_START, "").replace(HL_END, "")
+        if redact_text(plain) != plain:
+            removed += 1
+        else:
+            kept.append(line.replace(HL_START, "[").replace(HL_END, "]"))
+    if removed:
+        kept.append(f"[{removed} line(s) hidden by privacy settings]")
+    return "\n".join(kept)
 
 
 def redact_text(text: Optional[str]) -> Optional[str]:

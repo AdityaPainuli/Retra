@@ -141,7 +141,10 @@ class CaptureDaemon:
 
         privacy = self.settings.privacy
         try:
-            self.db.cleanup_old_data(event_retention_days=privacy.event_retention_days)
+            root = SCREENSHOTS_DIR.resolve()
+            for filepath in self.db.cleanup_old_data(event_retention_days=privacy.event_retention_days):
+                if root in Path(filepath).resolve().parents:
+                    ScreenshotCapture.delete(filepath)
             log.info(
                 "Old data cleanup complete (events: %s)",
                 f"{privacy.event_retention_days}d" if privacy.event_retention_days else "kept forever",

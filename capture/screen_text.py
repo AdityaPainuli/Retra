@@ -64,11 +64,12 @@ _TOKEN_RE = re.compile(
 # Long unbroken strings mixing letters and digits read like secrets/hashes.
 _LONG_SECRET_RE = re.compile(r"\b(?=[A-Za-z0-9_\-+/=]*\d)(?=[A-Za-z0-9_\-+/=]*[A-Za-z])[A-Za-z0-9_\-+/=]{32,}\b")
 _CARD_RE = re.compile(r"\b\d(?:[ -]?\d){12,18}\b")
-# "password: hunter2", "api_key = abc", "pin 1234". With only a space before
-# the value, it must contain a digit so prose like "password reset" survives.
+# "password: hunter2", "api_key = abc", '"password": "x"', "pin 1234". With
+# only a space before the value, it must contain a digit so prose like
+# "password reset" survives.
 _SECRET_FIELD_RE = re.compile(
     r"(?i)\b(password|passwd|passcode|pin|secret|api[_ ]?key|access[_ ]?token|token|otp)\b"
-    r"(\s*[:=]\s*(?=\S{4,})|\s+(?=\S*\d)(?=\S{4,}))\S+"
+    r"([\"']?\s*[:=]\s*(?=\S{4,})|\s+(?=\S*\d)(?=\S{4,}))\S+"
 )
 # "Your verification code is 482913", "OTP for login: 1234"
 _OTP_RE = re.compile(r"(?i)\b(otp|one[- ]time|verification|security code|login code|code is)\b([^\n\d]{0,25})\d{4,8}\b")
@@ -127,8 +128,12 @@ def ocr_screenshot(db, screenshot_id: int, filepath: str,
     except Exception as e:
         log.warning(f"Screen text extraction failed for {filepath}: {e}")
         return False
-    # None means the file isn't a readable image; retrying won't help.
-    db.set_screen_text(screenshot_id, text or "")
+    if text is None:
+        # Vision couldn't process it. Keep the row pending so the image isn't
+        # purged without its text; the next maintenance pass retries.
+        log.warning(f"Screen text extraction returned nothing for {filepath}")
+        return False
+    db.set_screen_text(screenshot_id, text)
     if after:
         after(filepath)
     return True

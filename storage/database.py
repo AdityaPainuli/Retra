@@ -865,14 +865,20 @@ class Database:
 
     # ── Cleanup ───────────────────────────────────────────────────
 
-    def cleanup_old_data(self, event_retention_days: int = 0):
+    def cleanup_old_data(self, event_retention_days: int = 0) -> list[str]:
         """Delete activity older than its retention period. 0 means keep forever.
-        Screenshot rows (screen text) count as activity; their image files are
-        purged separately, much sooner."""
+        Screenshot rows (screen text) count as activity. Returns the image
+        paths of deleted screenshot rows that still had one, for the caller
+        to delete (usually none: images are purged much sooner)."""
         with self._conn() as conn:
-            if event_retention_days > 0:
-                cutoff = (datetime.now() - timedelta(days=event_retention_days)).isoformat()
-                conn.execute("DELETE FROM screenshots WHERE timestamp < ? AND filepath = ''", (cutoff,))
-                conn.execute("DELETE FROM window_events WHERE timestamp < ?", (cutoff,))
-                conn.execute("DELETE FROM sessions WHERE start_time < ?", (cutoff,))
-                conn.execute("DELETE FROM url_events WHERE timestamp < ?", (cutoff,))
+            if event_retention_days <= 0:
+                return []
+            cutoff = (datetime.now() - timedelta(days=event_retention_days)).isoformat()
+            images = [r["filepath"] for r in conn.execute(
+                "SELECT filepath FROM screenshots WHERE timestamp < ? AND filepath != ''", (cutoff,)
+            )]
+            conn.execute("DELETE FROM screenshots WHERE timestamp < ?", (cutoff,))
+            conn.execute("DELETE FROM window_events WHERE timestamp < ?", (cutoff,))
+            conn.execute("DELETE FROM sessions WHERE start_time < ?", (cutoff,))
+            conn.execute("DELETE FROM url_events WHERE timestamp < ?", (cutoff,))
+        return images

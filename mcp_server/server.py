@@ -23,7 +23,7 @@ from config.settings import get_settings
 from mcp_server.store import (
     active_hours, app_breakdown, category_breakdown, compact_url, filter_project,
     get_db, label, load_spans, minutes, parse_day, parse_when, project_breakdown,
-    redact_text, short, title_breakdown, url_breakdown,
+    redact_highlighted, redact_text, short, title_breakdown, url_breakdown,
 )
 
 MAX_NOTE_CHARS = 8000
@@ -256,7 +256,7 @@ def search_screen_text(query: str, since: Optional[str] = None, until: Optional[
                 "when": r["timestamp"][:16].replace("T", " "),
                 "app": r["app_name"],
                 "title": short(r["window_title"]),
-                "text": redact_text(r["snippet"]),
+                "text": redact_highlighted(r["snippet"]),
             }
             for r in rows
         ],
