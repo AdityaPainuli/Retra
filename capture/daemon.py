@@ -158,7 +158,10 @@ class CaptureDaemon:
         if not self._backlog_lock.acquire(blocking=False):
             return
         try:
-            done, failed = process_backlog(self.db, should_stop=lambda: not self.running)
+            done, failed = process_backlog(
+                self.db, should_stop=lambda: not self.running,
+                after=self.screenshotter.compress,
+            )
             if done or failed:
                 log.info(f"Extracted text from {done} queued screenshot(s), {failed} failed")
             purged, strays = purge_old_images(
@@ -445,7 +448,9 @@ class CaptureDaemon:
                 window_title=title,
             )
             screenshot_id = self.db.insert_screenshot(screenshot)
-            self._ocr_pool.submit(ocr_screenshot, self.db, screenshot_id, filepath)
+            self._ocr_pool.submit(
+                ocr_screenshot, self.db, screenshot_id, filepath, self.screenshotter.compress
+            )
             self._screenshots_since_start += 1
             self._last_screenshot_app = app
             self._last_screenshot_title = title

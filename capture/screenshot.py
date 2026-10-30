@@ -1,9 +1,10 @@
 """
 Retra Screenshot Capture
 Captures the active window (not the whole screen) using macOS screencapture.
-Optimized: downscales to 1280px max width to reduce storage by ~75%.
-Images are short-lived: their text is extracted on-device and the image is
-deleted after a couple of days (see CaptureDaemon._purge_old_images).
+The full-resolution capture is read for text first (small text OCRs far
+better before downscaling), then compress() shrinks it to 1280px max width.
+Images are short-lived: they are deleted after a couple of days once their
+text is saved (see purge_old_images).
 """
 
 import subprocess
@@ -21,21 +22,16 @@ class ScreenshotCapture:
 
     def capture(self, window_id: int) -> Optional[str]:
         """
-        Capture one window, downscale, and save as compressed JPEG.
-        Returns the filepath or None if capture failed.
+        Capture one window at full resolution. Returns the filepath or None
+        if capture failed. Call compress() once its text has been read.
 
         Only the given window is captured, so other windows, notifications and
         the menu bar never end up in the image.
-
-        Pipeline: screencapture -> resize to max_width -> compress quality -> thumbnail
-        A typical retina screenshot goes from ~2MB to ~80-150KB after resize+compress.
         """
         timestamp = datetime.now()
         date_dir = self.output_dir / timestamp.strftime("%Y-%m-%d")
         date_dir.mkdir(exist_ok=True)
-
-        filename = f"screen_{timestamp.strftime('%H%M%S')}.jpg"
-        filepath = date_dir / filename
+        filepath = date_dir / f"screen_{timestamp.strftime('%H%M%S')}.jpg"
 
         try:
             # macOS screencapture: -x no sound, -o no window shadow,
@@ -44,36 +40,46 @@ class ScreenshotCapture:
                 ["screencapture", "-x", "-o", f"-l{window_id}", "-t", "jpg", str(filepath)],
                 capture_output=True, timeout=10,
             )
-
             if result.returncode != 0 or not filepath.exists():
                 return None
-
-            # Downscale to max_width (e.g. 2560px retina -> 1280px)
-            # This is the biggest storage win: cuts file size ~75%
-            # -Z resizes to fit within a box while preserving aspect ratio
-            subprocess.run(
-                ["sips", "-Z", str(self.max_width), str(filepath)],
-                capture_output=True, timeout=10,
-            )
-
-            # Compress with quality setting
-            subprocess.run(
-                ["sips", "-s", "formatOptions", str(self.quality), str(filepath)],
-                capture_output=True, timeout=10,
-            )
-
-            # Generate thumbnail (320px width from the already-resized image — fast)
-            thumb_path = date_dir / f"thumb_{filename}"
-            subprocess.run(
-                ["sips", "-Z", "320", str(filepath), "--out", str(thumb_path)],
-                capture_output=True, timeout=10,
-            )
-
             return str(filepath)
 
         except (subprocess.TimeoutExpired, Exception) as e:
             print(f"[Retra] Screenshot capture failed: {e}")
             return None
+
+    def compress(self, filepath: str):
+        """
+        Downscale + recompress a capture and make its thumbnail. Skips images
+        that already have a thumbnail, so it's safe to call twice.
+
+        Pipeline: resize to max_width -> compress quality -> thumbnail
+        A typical retina screenshot goes from ~2MB to ~80-150KB after resize+compress.
+        """
+        path = Path(filepath)
+        thumb_path = path.parent / f"thumb_{path.name}"
+        if not path.exists() or thumb_path.exists():
+            return
+        try:
+            # Downscale to max_width (e.g. 2560px retina -> 1280px)
+            # This is the biggest storage win: cuts file size ~75%
+            # -Z resizes to fit within a box while preserving aspect ratio
+            subprocess.run(
+                ["sips", "-Z", str(self.max_width), str(path)],
+                capture_output=True, timeout=10,
+            )
+            # Compress with quality setting
+            subprocess.run(
+                ["sips", "-s", "formatOptions", str(self.quality), str(path)],
+                capture_output=True, timeout=10,
+            )
+            # Generate thumbnail (320px width from the already-resized image — fast)
+            subprocess.run(
+                ["sips", "-Z", "320", str(path), "--out", str(thumb_path)],
+                capture_output=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, Exception) as e:
+            print(f"[Retra] Screenshot compress failed: {e}")
 
     @staticmethod
     def delete(filepath: str):
