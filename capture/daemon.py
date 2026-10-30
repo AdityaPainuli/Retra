@@ -11,6 +11,8 @@ import sys
 import logging
 import sqlite3
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -19,12 +21,14 @@ from capture.window_tracker import (
     get_active_window,
     is_screen_locked,
     is_incognito,
+    is_secure_input_active,
     ActiveWindow,
     get_browser_url_applescript,
     extract_domain,
     get_project_hint,
 )
-from capture.screenshot import ScreenshotCapture
+from capture.screenshot import ScreenshotCapture, purge_old_images
+from capture.screen_text import ocr_screenshot, process_backlog
 from capture.idle_detector import is_user_idle
 from storage.database import Database
 from storage.models import WindowEvent, Screenshot
@@ -67,6 +71,13 @@ class CaptureDaemon:
         # Screenshot dedup: skip if screen likely unchanged
         self._last_screenshot_app: Optional[str] = None
         self._last_screenshot_title: Optional[str] = None
+        # Whether the current window may be screenshotted (set each cycle)
+        self._window_blocked = False
+
+        # OCR runs off the capture loop: one worker, so images are processed
+        # in order and Vision never runs twice at once.
+        self._ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="retra-ocr")
+        self._backlog_lock = threading.Lock()
 
         self._events_since_start = 0
         self._screenshots_since_start = 0
@@ -130,18 +141,41 @@ class CaptureDaemon:
 
         privacy = self.settings.privacy
         try:
-            self.db.cleanup_old_data(
-                event_retention_days=privacy.event_retention_days,
-                screenshot_retention_days=privacy.retention_days,
-            )
-            self.screenshotter.cleanup_old(privacy.retention_days)
+            root = SCREENSHOTS_DIR.resolve()
+            for filepath in self.db.cleanup_old_data(event_retention_days=privacy.event_retention_days):
+                if root in Path(filepath).resolve().parents:
+                    ScreenshotCapture.delete(filepath)
             log.info(
-                "Old data cleanup complete (screenshots: %dd, events: %s)",
-                privacy.retention_days,
+                "Old data cleanup complete (events: %s)",
                 f"{privacy.event_retention_days}d" if privacy.event_retention_days else "kept forever",
             )
         except Exception as e:
             log.warning(f"Cleanup failed (non-fatal): {e}")
+
+        # OCR anything left unprocessed (e.g. daemon stopped mid-queue), then
+        # delete images past their retention.
+        self._ocr_pool.submit(self._process_screen_text_backlog)
+
+    def _process_screen_text_backlog(self):
+        """Runs on the OCR worker."""
+        if not self._backlog_lock.acquire(blocking=False):
+            return
+        try:
+            done, failed = process_backlog(
+                self.db, should_stop=lambda: not self.running,
+                after=self.screenshotter.compress,
+            )
+            if done or failed:
+                log.info(f"Extracted text from {done} queued screenshot(s), {failed} failed")
+            purged, strays = purge_old_images(
+                self.db, SCREENSHOTS_DIR, self.settings.privacy.retention_days
+            )
+            if purged or strays:
+                log.info(f"Deleted {purged} screenshot image(s) past retention, {strays} stray")
+        except Exception as e:
+            log.warning(f"Screen text backlog failed (non-fatal): {e}")
+        finally:
+            self._backlog_lock.release()
 
     CATCHUP_CHECK_SEC = 1800
     # Each run can cost a wiki compile (~$0.30), so cap repeats for a day
@@ -217,6 +251,8 @@ class CaptureDaemon:
         # Check privacy blocklist
         for pattern in self.settings.privacy.blocked_url_patterns:
             if pattern.lower() in url.lower():
+                # Title may look harmless, but the page itself is private.
+                self._window_blocked = True
                 return window
 
         domain = extract_domain(url)
@@ -231,6 +267,7 @@ class CaptureDaemon:
             window_title=title,
             bundle_id=window.bundle_id,
             url=url,
+            window_id=window.window_id,
         )
 
     def _capture_cycle(self) -> Optional[ActiveWindow]:
@@ -266,11 +303,13 @@ class CaptureDaemon:
 
         # Check privacy blocklist
         blocked = self._is_blocked(window)
+        self._window_blocked = blocked
         if blocked:
             window = ActiveWindow(
                 app_name=window.app_name,
                 window_title="[blocked]",
                 bundle_id=window.bundle_id,
+                window_id=window.window_id,
             )
         else:
             # Enrich browser windows with URL/domain
@@ -365,10 +404,32 @@ class CaptureDaemon:
         self.last_url = url
         self.last_url_time = now
 
-    def _capture_screenshot(self, window: Optional[ActiveWindow] = None):
-        """Capture and store a screenshot. Skips if screen likely unchanged."""
-        app = window.app_name if window else ""
-        title = window.window_title if window else ""
+    def _screenshot_skip_reason(self, window: ActiveWindow) -> Optional[str]:
+        """Why this window must not be screenshotted right now, if anything."""
+        if self._window_blocked:
+            return "blocked app/URL"
+        app = window.app_name.lower()
+        if any(a.lower() in app for a in self.settings.privacy.screenshot_skip_apps):
+            return "private app"
+        if is_secure_input_active():
+            return "password field active"
+        if not window.window_id:
+            return "no window id"
+        return None
+
+    def _capture_screenshot(self, window: ActiveWindow):
+        """Capture and store a screenshot of the active window. Skips if the
+        window is private or the screen is likely unchanged."""
+        app = window.app_name
+        title = window.window_title
+
+        skip = self._screenshot_skip_reason(window)
+        if skip:
+            log.debug(f"Screenshot skipped ({skip})")
+            self.last_screenshot_time = time.time()
+            # Forget the dedup key so returning to the last window captures again
+            self._last_screenshot_app = self._last_screenshot_title = None
+            return
 
         # Dedup: skip if same app + window title as last screenshot
         # (screen is very likely identical)
@@ -381,7 +442,7 @@ class CaptureDaemon:
             self.last_screenshot_time = time.time()
             return
 
-        filepath = self.screenshotter.capture()
+        filepath = self.screenshotter.capture(window.window_id)
         if filepath:
             screenshot = Screenshot(
                 timestamp=datetime.now(),
@@ -389,7 +450,10 @@ class CaptureDaemon:
                 app_name=app,
                 window_title=title,
             )
-            self.db.insert_screenshot(screenshot)
+            screenshot_id = self.db.insert_screenshot(screenshot)
+            self._ocr_pool.submit(
+                ocr_screenshot, self.db, screenshot_id, filepath, self.screenshotter.compress
+            )
             self._screenshots_since_start += 1
             self._last_screenshot_app = app
             self._last_screenshot_title = title
@@ -441,6 +505,8 @@ class CaptureDaemon:
 
             time.sleep(self.settings.capture.poll_interval)
 
+        # Let an in-flight OCR finish so its row isn't left half-done.
+        self._ocr_pool.shutdown(wait=True, cancel_futures=True)
         log.info("Capture daemon stopped")
 
 

@@ -171,6 +171,9 @@ async def get_day(date_str: str):
                 "filepath": sc.filepath,
                 "app_name": sc.app_name,
                 "window_title": sc.window_title,
+                # Images are deleted after a few days; the text stays.
+                "has_image": bool(sc.filepath),
+                "screen_text": sc.ocr_text,
             }
             for sc in screenshots
         ],
@@ -582,6 +585,8 @@ async def get_screenshot(screenshot_id: int):
 
     if not row:
         raise HTTPException(404, "Screenshot not found.")
+    if not row["filepath"]:
+        raise HTTPException(404, "Screenshot image deleted after retention; only its text is kept.")
 
     filepath = Path(row["filepath"])
     if not filepath.exists():
@@ -1005,6 +1010,7 @@ async def get_settings_api():
         "privacy": {
             "blocked_apps": s.privacy.blocked_apps,
             "blocked_url_patterns": s.privacy.blocked_url_patterns,
+            "screenshot_skip_apps": s.privacy.screenshot_skip_apps,
             "blur_screenshots": s.privacy.blur_screenshots,
             "retention_days": s.privacy.retention_days,
             "event_retention_days": s.privacy.event_retention_days,

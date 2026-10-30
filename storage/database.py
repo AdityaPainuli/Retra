@@ -151,6 +151,36 @@ class Database:
                 "ON window_events(project_hint)"
             )
 
+            # Screen text: OCR'd (and redacted) text of each screenshot. NULL
+            # means not processed yet; '' means processed, no text found. Kept
+            # after the image itself is deleted (filepath set to '').
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(screenshots)")}
+            if "ocr_text" not in cols:
+                conn.execute("ALTER TABLE screenshots ADD COLUMN ocr_text TEXT")
+            conn.executescript("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS screen_text_fts USING fts5(
+                    ocr_text, app_name, window_title,
+                    content='screenshots', content_rowid='id'
+                );
+                CREATE TRIGGER IF NOT EXISTS screenshots_fts_ai AFTER INSERT ON screenshots BEGIN
+                    INSERT INTO screen_text_fts(rowid, ocr_text, app_name, window_title)
+                    VALUES (new.id, new.ocr_text, new.app_name, new.window_title);
+                END;
+                CREATE TRIGGER IF NOT EXISTS screenshots_fts_ad AFTER DELETE ON screenshots BEGIN
+                    INSERT INTO screen_text_fts(screen_text_fts, rowid, ocr_text, app_name, window_title)
+                    VALUES ('delete', old.id, old.ocr_text, old.app_name, old.window_title);
+                END;
+                CREATE TRIGGER IF NOT EXISTS screenshots_fts_au
+                AFTER UPDATE OF ocr_text, app_name, window_title ON screenshots BEGIN
+                    INSERT INTO screen_text_fts(screen_text_fts, rowid, ocr_text, app_name, window_title)
+                    VALUES ('delete', old.id, old.ocr_text, old.app_name, old.window_title);
+                    INSERT INTO screen_text_fts(rowid, ocr_text, app_name, window_title)
+                    VALUES (new.id, new.ocr_text, new.app_name, new.window_title);
+                END;
+            """)
+            if conn.execute("SELECT COUNT(*) FROM screen_text_fts_docsize").fetchone()[0] == 0:
+                conn.execute("INSERT INTO screen_text_fts(screen_text_fts) VALUES ('rebuild')")
+
     # ── Window Events ─────────────────────────────────────────────
 
     def insert_event(self, event: WindowEvent) -> int:
@@ -460,9 +490,50 @@ class Database:
                 app_name=r["app_name"],
                 window_title=r["window_title"],
                 thumbnail_path=r["thumbnail_path"],
+                ocr_text=r["ocr_text"],
             )
             for r in rows
         ]
+
+    def get_screenshots_pending_text(self, after_id: int = 0, limit: int = 100) -> list[tuple[int, str]]:
+        """(id, filepath) of screenshots not OCR'd yet, oldest first."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT id, filepath FROM screenshots
+                WHERE ocr_text IS NULL AND id > ?
+                ORDER BY id ASC LIMIT ?
+            """, (after_id, limit)).fetchall()
+        return [(r["id"], r["filepath"]) for r in rows]
+
+    def get_screenshot_files(self) -> set[str]:
+        """Every image path a row still points to."""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT filepath FROM screenshots WHERE filepath != ''").fetchall()
+        return {r["filepath"] for r in rows}
+
+    def set_screen_text(self, screenshot_id: int, text: str):
+        """Safe to call from a worker thread (opens its own connection)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE screenshots SET ocr_text = ? WHERE id = ?", (text, screenshot_id)
+            )
+
+    def get_images_to_purge(self, cutoff: datetime) -> list[tuple[int, str]]:
+        """(id, filepath) of images older than cutoff whose text is already
+        saved. Images still waiting for OCR are kept so no text is lost."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT id, filepath FROM screenshots
+                WHERE filepath != '' AND ocr_text IS NOT NULL AND timestamp < ?
+            """, (cutoff.isoformat(),)).fetchall()
+        return [(r["id"], r["filepath"]) for r in rows]
+
+    def mark_images_deleted(self, ids: list[int]):
+        with self._conn() as conn:
+            conn.executemany(
+                "UPDATE screenshots SET filepath = '', thumbnail_path = NULL WHERE id = ?",
+                [(i,) for i in ids],
+            )
 
     # ── Daily Summaries ───────────────────────────────────────────
 
@@ -794,14 +865,20 @@ class Database:
 
     # ── Cleanup ───────────────────────────────────────────────────
 
-    def cleanup_old_data(self, event_retention_days: int = 0, screenshot_retention_days: int = 90):
-        """Delete data older than its retention period. 0 means keep forever."""
+    def cleanup_old_data(self, event_retention_days: int = 0) -> list[str]:
+        """Delete activity older than its retention period. 0 means keep forever.
+        Screenshot rows (screen text) count as activity. Returns the image
+        paths of deleted screenshot rows that still had one, for the caller
+        to delete (usually none: images are purged much sooner)."""
         with self._conn() as conn:
-            if screenshot_retention_days > 0:
-                cutoff = (datetime.now() - timedelta(days=screenshot_retention_days)).isoformat()
-                conn.execute("DELETE FROM screenshots WHERE timestamp < ?", (cutoff,))
-            if event_retention_days > 0:
-                cutoff = (datetime.now() - timedelta(days=event_retention_days)).isoformat()
-                conn.execute("DELETE FROM window_events WHERE timestamp < ?", (cutoff,))
-                conn.execute("DELETE FROM sessions WHERE start_time < ?", (cutoff,))
-                conn.execute("DELETE FROM url_events WHERE timestamp < ?", (cutoff,))
+            if event_retention_days <= 0:
+                return []
+            cutoff = (datetime.now() - timedelta(days=event_retention_days)).isoformat()
+            images = [r["filepath"] for r in conn.execute(
+                "SELECT filepath FROM screenshots WHERE timestamp < ? AND filepath != ''", (cutoff,)
+            )]
+            conn.execute("DELETE FROM screenshots WHERE timestamp < ?", (cutoff,))
+            conn.execute("DELETE FROM window_events WHERE timestamp < ?", (cutoff,))
+            conn.execute("DELETE FROM sessions WHERE start_time < ?", (cutoff,))
+            conn.execute("DELETE FROM url_events WHERE timestamp < ?", (cutoff,))
+        return images

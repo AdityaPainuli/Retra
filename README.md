@@ -15,7 +15,7 @@ Ever wonder where your day went? Retra runs silently in the background and gives
 - **Smart Categorization** — Auto-categorizes into Deep Work, Communication, Browsing, Entertainment, Writing, Learning
 - **Project Auto-Detection** — Parses project/repo names from VS Code, Cursor, terminal, and GitHub window titles
 - **Browser Context** — Captures actual URLs and domains when browsing, not just "Brave Browser"
-- **Periodic Screenshots** — Every 3 minutes, compressed and downscaled (80-150KB each)
+- **Screen Text** — Every 3 minutes, screenshots the active window only, reads its text on-device (Apple Vision), masks secrets, and keeps the text searchable. The image itself is deleted after 2 days
 - **Screenshot Dedup** — Skips capture when the screen hasn't changed
 - **Idle Detection** — Pauses tracking when you step away
 - **AI Reflections** — Daily summaries via Claude API or local Ollama with rich context (URLs, projects, patterns)
@@ -31,7 +31,7 @@ Ever wonder where your day went? Retra runs silently in the background and gives
 - **Privacy Controls** — Blocklist for apps/URLs, all data stays on your machine
 - **Auto-Start** — Install as macOS Launch Agent, survives sleep/wake and reboots
 - **Automated Pipeline** — Scheduled daily journal export + wiki compilation at 23:00, auto weekly rollups on Sundays
-- **Storage Optimized** — ~15-20MB/day instead of ~65MB (downscaled screenshots, dedup, auto-cleanup)
+- **Storage Optimized** — screenshots are short-lived; only their text (a few KB each) is kept
 
 ## Dashboard Pages
 
@@ -184,8 +184,9 @@ screenshot_quality = 40        # JPEG quality (1-100)
 [privacy]
 blocked_apps = ["1Password", "Keychain Access"]
 blocked_url_patterns = ["bank", "chase.com"]
-retention_days = 90            # auto-delete screenshots older than this
-event_retention_days = 0       # events/URLs; 0 = keep forever (default)
+screenshot_skip_apps = ["Messages", "WhatsApp", "Signal", "Telegram", "FaceTime", "Passwords", "System Settings"]
+retention_days = 2             # screenshot images are deleted after this; their text is kept
+event_retention_days = 0       # events/URLs/screen text; 0 = keep forever (default)
 
 [categories]
 coding = ["VS Code", "Code", "Xcode", "Terminal", "iTerm", "PyCharm", "Cursor", "Warp"]
@@ -261,7 +262,8 @@ Every 3 seconds, the daemon:
 2. For browsers, fetches the actual URL via AppleScript and enriches the window title with the domain
 3. Categorizes the activity (coding, browsing, entertainment, etc.)
 4. Records the event to SQLite (with dedup — skips identical consecutive events, records continuation heartbeats every 60s)
-5. Every 3 minutes, captures a screenshot, downscales to 1280px max width, compresses to ~80-150KB
+5. Every 3 minutes, screenshots the active window only (`screencapture -l`), downscales to 1280px max width, and compresses it. Skipped for blocked apps/URLs, `screenshot_skip_apps`, and whenever a password field has focus (macOS Secure Input)
+6. A background worker reads the screenshot's text with Apple's Vision framework (on-device), masks emails, card numbers, API keys/tokens, passwords and one-time codes, and stores it in a full-text index. Images older than `retention_days` are deleted once their text is saved
 
 ### Session Aggregation
 
@@ -337,6 +339,7 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `recent_work(days=1, project=None)` | Time per project and category, top windows and URLs, active hours (up to 30 days) |
 | `day_summary(day="today")` | Focus stats, projects, AI reflection, and the Obsidian daily note for one day |
 | `search_activity(query, since, until)` | When something was worked on, matched against window titles, URLs, and page titles |
+| `search_screen_text(query, since, until)` | What was on screen: full-text search over text read from screenshots, with snippets |
 | `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
 | `wiki_page(name=None)` | A page from `retra-wiki/` in the vault (index when no name is given) |
 
@@ -368,18 +371,19 @@ Use absolute paths to the venv's Python so the client doesn't need your shell en
 - **100% local** — All data stored in SQLite on your machine
 - **No telemetry** — Nothing leaves your computer (unless you enable Claude API for summaries/wiki)
 - **Incognito safe** — Private/incognito browser windows are never recorded (no events, URLs, or screenshots)
+- **Screenshots stay narrow and short-lived** — Only the active window, never private apps or password fields, text read on-device with secrets masked, image deleted after 2 days
 - **Blocklist** — Exclude sensitive apps and URLs from tracking
 - **`.env` for secrets** — API keys stored in `.env`, never committed
-- **Data retention** — Screenshots auto-delete after 90 days; activity events are kept forever unless you set `event_retention_days`
+- **Data retention** — Screenshot images auto-delete after 2 days; activity events and screen text are kept forever unless you set `event_retention_days`
 - **Open source** — Audit every line of code
 
 ## Storage
 
 | Component        | Size            | Notes                                        |
 | ---------------- | --------------- | -------------------------------------------- |
-| Screenshots      | ~15-20 MB/day   | Downscaled to 1280px, JPEG quality 40, dedup |
+| Screenshots      | ~10 MB total    | Only the last 2 days of images are kept      |
+| Screen text      | ~0.3 MB/day     | ~2 KB per capture, SQLite full-text index    |
 | Database         | ~1-2 MB/day     | SQLite with WAL mode                         |
-| 90-day retention | ~1.5-2 GB total | Screenshot cleanup runs daily                |
 
 ## Contributing
 
