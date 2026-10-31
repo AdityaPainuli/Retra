@@ -167,6 +167,7 @@ python main.py start
 | `python main.py ask "question"`     | Query the wiki with a question                          |
 | `python main.py backfill`           | Compile all existing daily notes into wiki              |
 | `python main.py mcp`                | Run the read-only MCP server (stdio) for local agents   |
+| `python main.py mcp-usage`          | Show how often agents called the MCP server, per week   |
 | `python main.py install`            | Install as macOS Launch Agents (auto-start on login)    |
 | `python main.py uninstall`          | Remove Launch Agents                                    |
 
@@ -344,6 +345,8 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `wiki_page(name=None)` | A page from `retra-wiki/` in the vault (index when no name is given) |
 
 It opens `data/retra.db` with SQLite `mode=ro`, makes no network calls, and hides apps and URLs matching `privacy.blocked_apps` / `blocked_url_patterns` (their time shows as `[private]`). URLs are returned without query strings. Set `RETRA_DB_PATH` to point it at a different database.
+
+Every tool call is logged locally to `data/mcp_usage.jsonl` (time, client, tool, arguments, duration, result size) so you can see whether agents actually use it. `python main.py mcp-usage` prints calls per week by client and tool.
 
 Register it with Claude Code (available in every project):
 

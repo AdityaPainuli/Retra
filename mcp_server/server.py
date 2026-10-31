@@ -8,15 +8,17 @@ working on and pull context from captured activity. No network, no writes.
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import re
 import sqlite3
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from config.settings import get_settings
@@ -25,6 +27,7 @@ from mcp_server.store import (
     get_db, label, load_spans, minutes, parse_day, parse_when, project_breakdown,
     redact_highlighted, redact_text, short, title_breakdown, url_breakdown,
 )
+from mcp_server.usage import log_call
 
 MAX_NOTE_CHARS = 8000
 MAX_WIKI_CHARS = 12000
@@ -48,16 +51,42 @@ def tool(fn):
     """Register a read-only tool that returns compact JSON text.
 
     The SDK's default is indented JSON plus a duplicate structured copy,
-    which roughly doubles tokens for the same data.
+    which roughly doubles tokens for the same data. Every call is logged to
+    data/mcp_usage.jsonl (see mcp_server/usage.py).
     """
+    sig = inspect.signature(fn, eval_str=True)
+
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs) -> str:
+    def wrapper(*args, ctx: Context, **kwargs) -> str:
+        started = time.monotonic()
         try:
             result = fn(*args, **kwargs)
         except (ValueError, FileNotFoundError) as e:
             result = {"error": str(e)}
-        return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+        text = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+        log_call(
+            fn.__name__, _client_name(ctx), sig.bind_partial(*args, **kwargs).arguments,
+            ms=int((time.monotonic() - started) * 1000),
+            ok=not (isinstance(result, dict) and "error" in result), chars=len(text),
+        )
+        return text
+
+    # Expose ctx to the SDK so it injects the request context; it's hidden
+    # from the tool's input schema.
+    wrapper.__annotations__ = {**fn.__annotations__, "ctx": Context, "return": str}
+    wrapper.__signature__ = sig.replace(
+        parameters=[*sig.parameters.values(),
+                    inspect.Parameter("ctx", inspect.Parameter.KEYWORD_ONLY, annotation=Context)],
+        return_annotation=str,
+    )
     return mcp.tool(annotations=READ_ONLY, structured_output=False)(wrapper)
+
+
+def _client_name(ctx: Context) -> Optional[str]:
+    try:
+        return ctx.session.client_params.client_info.name
+    except (AttributeError, ValueError):
+        return None
 
 
 def _start_of(d: date) -> datetime:
