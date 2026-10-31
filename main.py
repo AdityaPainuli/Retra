@@ -20,6 +20,7 @@ Usage:
     python main.py ask "question"  Query the wiki
     python main.py backfill    Compile all existing daily notes into wiki
     python main.py mcp         Run the read-only MCP server (stdio) for local agents
+    python main.py mcp-usage   Show how often agents called the MCP server, per week
     python main.py install     Install as macOS Launch Agent (auto-start on login)
     python main.py uninstall   Remove Launch Agent
 """
@@ -245,6 +246,11 @@ def cmd_mcp():
     run()
 
 
+def cmd_mcp_usage():
+    from mcp_server.usage import weekly_report
+    print(weekly_report())
+
+
 def cmd_status():
     from capture.health import get_health
     from storage.database import Database
@@ -433,6 +439,7 @@ COMMANDS = {
     "ask": cmd_ask,
     "backfill": cmd_backfill,
     "mcp": cmd_mcp,
+    "mcp-usage": cmd_mcp_usage,
     "install": cmd_install,
     "uninstall": cmd_uninstall,
 }
