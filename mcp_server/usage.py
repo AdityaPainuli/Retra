@@ -8,14 +8,29 @@ and is kept out of the database, which the MCP server only opens read-only.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from capture.screen_text import redact
 from config.settings import DATA_DIR
+from mcp_server.store import PRIVATE, redact_text
 
 USAGE_PATH = DATA_DIR / "mcp_usage.jsonl"
 MAX_ARG_CHARS = 200
+_URL_TAIL_RE = re.compile(r"(\S)[?#]\S+")
+
+
+def _clean_arg(value):
+    """Arguments are often search text, so apply the same privacy rules as
+    the tools' output: blocked apps/URLs dropped, secrets masked, URL query
+    strings removed."""
+    if not isinstance(value, str):
+        return value
+    if redact_text(value) != value:
+        return PRIVATE
+    return _URL_TAIL_RE.sub(r"\1", redact(value))[:MAX_ARG_CHARS]
 
 
 def log_call(tool: str, client: str | None, args: dict, ms: int, ok: bool, chars: int,
@@ -24,8 +39,7 @@ def log_call(tool: str, client: str | None, args: dict, ms: int, ok: bool, chars
         "ts": datetime.now().isoformat(timespec="seconds"),
         "client": client or "unknown",
         "tool": tool,
-        "args": {k: v if not isinstance(v, str) else v[:MAX_ARG_CHARS]
-                 for k, v in args.items() if v is not None},
+        "args": {k: _clean_arg(v) for k, v in args.items() if v is not None},
         "ms": ms,
         "ok": ok,
         "chars": chars,

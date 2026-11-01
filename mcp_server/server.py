@@ -59,17 +59,21 @@ def tool(fn):
     @functools.wraps(fn)
     def wrapper(*args, ctx: Context, **kwargs) -> str:
         started = time.monotonic()
+        ok, text = False, ""
         try:
-            result = fn(*args, **kwargs)
-        except (ValueError, FileNotFoundError) as e:
-            result = {"error": str(e)}
-        text = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
-        log_call(
-            fn.__name__, _client_name(ctx), sig.bind_partial(*args, **kwargs).arguments,
-            ms=int((time.monotonic() - started) * 1000),
-            ok=not (isinstance(result, dict) and "error" in result), chars=len(text),
-        )
-        return text
+            try:
+                result = fn(*args, **kwargs)
+            except (ValueError, FileNotFoundError) as e:
+                result = {"error": str(e)}
+            text = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+            ok = not (isinstance(result, dict) and "error" in result)
+            return text
+        finally:
+            # Also runs when an unexpected error propagates, so it's counted as failed.
+            log_call(
+                fn.__name__, _client_name(ctx), sig.bind_partial(*args, **kwargs).arguments,
+                ms=int((time.monotonic() - started) * 1000), ok=ok, chars=len(text),
+            )
 
     # Expose ctx to the SDK so it injects the request context; it's hidden
     # from the tool's input schema.
