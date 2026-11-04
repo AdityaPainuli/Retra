@@ -29,6 +29,7 @@ from capture.window_tracker import (
 )
 from capture.screenshot import ScreenshotCapture, purge_old_images
 from capture.screen_text import ocr_screenshot, process_backlog
+from capture.claude_sessions import sync_sessions
 from capture.idle_detector import is_user_idle
 from storage.database import Database
 from storage.models import WindowEvent, Screenshot
@@ -40,6 +41,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("retra")
+
+SOURCES_SYNC_INTERVAL = 300  # seconds between Claude Code session log scans
 
 
 def _backup_db(src: Path, dest: Path):
@@ -78,6 +81,11 @@ class CaptureDaemon:
         # in order and Vision never runs twice at once.
         self._ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="retra-ocr")
         self._backlog_lock = threading.Lock()
+
+        # Claude Code session logs are re-read off the capture loop too.
+        self._sources_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="retra-sources")
+        self._last_sources_sync: float = 0
+        self._sources_running = threading.Event()
 
         self._events_since_start = 0
         self._screenshots_since_start = 0
@@ -155,6 +163,30 @@ class CaptureDaemon:
         # OCR anything left unprocessed (e.g. daemon stopped mid-queue), then
         # delete images past their retention.
         self._ocr_pool.submit(self._process_screen_text_backlog)
+
+    def _maybe_sync_sources(self):
+        if not self.settings.sources.claude_code or self._sources_running.is_set():
+            return
+        if time.time() - self._last_sources_sync < SOURCES_SYNC_INTERVAL:
+            return
+        self._last_sources_sync = time.time()
+        self._sources_running.set()
+        self._sources_pool.submit(self._sync_sources)
+
+    def _sync_sources(self):
+        """Runs on the sources worker."""
+        try:
+            saved = sync_sessions(
+                self.db, self.settings.sources.resolved_claude_code_dir,
+                retention_days=self.settings.privacy.event_retention_days,
+                should_stop=lambda: not self.running,
+            )
+            if saved:
+                log.info(f"Synced {saved} Claude Code session(s)")
+        except Exception as e:
+            log.warning(f"Claude Code session sync failed: {e}")
+        finally:
+            self._sources_running.clear()
 
     def _process_screen_text_backlog(self):
         """Runs on the OCR worker."""
@@ -500,6 +532,8 @@ class CaptureDaemon:
                 if window:
                     self._maybe_catchup()
 
+                self._maybe_sync_sources()
+
             except Exception as e:
                 log.error(f"Capture error: {e}")
 
@@ -507,6 +541,7 @@ class CaptureDaemon:
 
         # Let an in-flight OCR finish so its row isn't left half-done.
         self._ocr_pool.shutdown(wait=True, cancel_futures=True)
+        self._sources_pool.shutdown(wait=True, cancel_futures=True)
         log.info("Capture daemon stopped")
 
 

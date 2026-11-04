@@ -142,6 +142,48 @@ class ReadOnlyDatabase(Database):
             """, (HL_START, HL_END, match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
         return [dict(r) for r in rows if not is_private(r["app_name"], r["window_title"] or "")][:limit]
 
+    def get_agent_sessions(self, start: datetime, end: datetime, limit: int) -> list[dict]:
+        """Coding agent sessions active in [start, end), most recent first."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT * FROM agent_sessions
+                WHERE ended_at >= ? AND started_at < ?
+                ORDER BY ended_at DESC LIMIT ?
+            """, (start.isoformat(), end.isoformat(), limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_agent_prompts(self, session_id: str, limit: int) -> list[dict]:
+        """The session's last `limit` prompts, oldest first."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT timestamp, text FROM agent_messages
+                WHERE session_id = ? AND kind = 'prompt'
+                ORDER BY id DESC LIMIT ?
+            """, (session_id, limit)).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def search_agent_messages(self, match: str, start: datetime, end: datetime,
+                              limit: int) -> list[dict]:
+        """Full-text search over session prompts and recaps, best first."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT m.timestamp, m.kind, s.session_id, s.title, s.project, s.cwd, s.branch,
+                       snippet(agent_messages_fts, 0, ?, ?, '…', 24) AS snippet
+                FROM agent_messages_fts
+                JOIN agent_messages m ON m.id = agent_messages_fts.rowid
+                JOIN agent_sessions s ON s.session_id = m.session_id
+                WHERE agent_messages_fts MATCH ? AND m.timestamp >= ? AND m.timestamp < ?
+                ORDER BY bm25(agent_messages_fts)
+                LIMIT ?
+            """, (HL_START, HL_END, match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
+        return [dict(r) for r in rows if not session_is_private(r)][:limit]
+
+
+def session_is_private(session) -> bool:
+    """A session whose folder, project or title matches the blocklist."""
+    hay = " ".join(str(session[k] or "") for k in ("cwd", "project", "title"))
+    return redact_text(hay) != hay
+
 
 def db_path() -> Path:
     return Path(os.environ.get("RETRA_DB_PATH") or DB_PATH)

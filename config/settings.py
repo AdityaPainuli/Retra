@@ -255,6 +255,17 @@ class DashboardConfig:
 
 
 @dataclass
+class SourcesConfig:
+    # Claude Code session logs: what was asked, decided and changed per project.
+    claude_code: bool = True
+    claude_code_dir: str = "~/.claude/projects"
+
+    @property
+    def resolved_claude_code_dir(self) -> Path:
+        return Path(self.claude_code_dir).expanduser()
+
+
+@dataclass
 class Settings:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
@@ -262,6 +273,7 @@ class Settings:
     ai: AIConfig = field(default_factory=AIConfig)
     obsidian: ObsidianConfig = field(default_factory=ObsidianConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    sources: SourcesConfig = field(default_factory=SourcesConfig)
 
 
 def load_settings(config_path: Optional[str] = None) -> Settings:
@@ -308,6 +320,11 @@ def load_settings(config_path: Optional[str] = None) -> Settings:
         for k, v in raw["dashboard"].items():
             if hasattr(settings.dashboard, k):
                 setattr(settings.dashboard, k, v)
+
+    if "sources" in raw:
+        for k, v in raw["sources"].items():
+            if hasattr(settings.sources, k):
+                setattr(settings.sources, k, v)
 
     return settings
 

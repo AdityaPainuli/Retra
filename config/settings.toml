@@ -38,3 +38,7 @@ daily_notes_folder = "Retra"
 [dashboard]
 port = 5173
 auto_open = true
+
+[sources]
+claude_code = true                      # read Claude Code session logs (prompts, recaps, files changed)
+claude_code_dir = "~/.claude/projects"

@@ -181,6 +181,49 @@ class Database:
             if conn.execute("SELECT COUNT(*) FROM screen_text_fts_docsize").fetchone()[0] == 0:
                 conn.execute("INSERT INTO screen_text_fts(screen_text_fts) VALUES ('rebuild')")
 
+            # Coding agent sessions (Claude Code logs). One row per session,
+            # plus its prompts and turn recaps as searchable messages.
+            # log_size/log_mtime tell the sync which log files changed.
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    cwd TEXT,
+                    project TEXT,
+                    branch TEXT,
+                    title TEXT,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    prompt_count INTEGER DEFAULT 0,
+                    files TEXT,
+                    prs TEXT,
+                    last_status TEXT,
+                    last_reply TEXT,
+                    log_path TEXT,
+                    log_size INTEGER,
+                    log_mtime REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_sessions_ended ON agent_sessions(ended_at);
+                CREATE TABLE IF NOT EXISTS agent_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    timestamp TEXT,
+                    kind TEXT NOT NULL,
+                    text TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_messages_session ON agent_messages(session_id);
+                CREATE VIRTUAL TABLE IF NOT EXISTS agent_messages_fts USING fts5(
+                    text, content='agent_messages', content_rowid='id'
+                );
+                CREATE TRIGGER IF NOT EXISTS agent_messages_fts_ai AFTER INSERT ON agent_messages BEGIN
+                    INSERT INTO agent_messages_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+                CREATE TRIGGER IF NOT EXISTS agent_messages_fts_ad AFTER DELETE ON agent_messages BEGIN
+                    INSERT INTO agent_messages_fts(agent_messages_fts, rowid, text)
+                    VALUES ('delete', old.id, old.text);
+                END;
+            """)
+
     # ── Window Events ─────────────────────────────────────────────
 
     def insert_event(self, event: WindowEvent) -> int:
@@ -535,6 +578,28 @@ class Database:
                 [(i,) for i in ids],
             )
 
+    # ── Agent Sessions ────────────────────────────────────────────
+
+    def get_agent_log_state(self) -> dict[str, tuple[int, float]]:
+        """{log_path: (size, mtime)} of every synced session log."""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT log_path, log_size, log_mtime FROM agent_sessions").fetchall()
+        return {r["log_path"]: (r["log_size"], r["log_mtime"]) for r in rows}
+
+    def save_agent_session(self, session: dict, messages: list[tuple[str, str, str]]):
+        """Replace one session and its (timestamp, kind, text) messages.
+        Safe to call from a worker thread (opens its own connection)."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM agent_messages WHERE session_id = ?", (session["session_id"],))
+            cols = ", ".join(session)
+            marks = ", ".join("?" * len(session))
+            conn.execute(f"INSERT OR REPLACE INTO agent_sessions ({cols}) VALUES ({marks})",
+                         tuple(session.values()))
+            conn.executemany(
+                "INSERT INTO agent_messages (session_id, timestamp, kind, text) VALUES (?, ?, ?, ?)",
+                [(session["session_id"], *m) for m in messages],
+            )
+
     # ── Daily Summaries ───────────────────────────────────────────
 
     def compute_daily_summary(self, target_date: date) -> DailySummary:
@@ -867,7 +932,7 @@ class Database:
 
     def cleanup_old_data(self, event_retention_days: int = 0) -> list[str]:
         """Delete activity older than its retention period. 0 means keep forever.
-        Screenshot rows (screen text) count as activity. Returns the image
+        Screenshot rows (screen text) and agent sessions count as activity. Returns the image
         paths of deleted screenshot rows that still had one, for the caller
         to delete (usually none: images are purged much sooner)."""
         with self._conn() as conn:
@@ -881,4 +946,7 @@ class Database:
             conn.execute("DELETE FROM window_events WHERE timestamp < ?", (cutoff,))
             conn.execute("DELETE FROM sessions WHERE start_time < ?", (cutoff,))
             conn.execute("DELETE FROM url_events WHERE timestamp < ?", (cutoff,))
+            conn.execute("""DELETE FROM agent_messages WHERE session_id IN
+                (SELECT session_id FROM agent_sessions WHERE ended_at < ?)""", (cutoff,))
+            conn.execute("DELETE FROM agent_sessions WHERE ended_at < ?", (cutoff,))
         return images

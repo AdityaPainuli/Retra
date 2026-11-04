@@ -25,7 +25,7 @@ from config.settings import get_settings
 from mcp_server.store import (
     active_hours, app_breakdown, category_breakdown, compact_url, filter_project,
     get_db, label, load_spans, minutes, parse_day, parse_when, project_breakdown,
-    redact_highlighted, redact_text, short, title_breakdown, url_breakdown,
+    redact_highlighted, redact_text, session_is_private, short, title_breakdown, url_breakdown,
 )
 from mcp_server.usage import log_call
 
@@ -41,7 +41,9 @@ mcp = MCPServer(
         "or list_projects for 'what have I been working on', day_summary for a "
         "specific day, search_activity to find when something was worked on, "
         "search_screen_text to find what was on screen (text read from "
-        "screenshots), and wiki_page for the long-term notes compiled from daily activity. Times "
+        "screenshots), coding_sessions for recent Claude Code sessions (what was "
+        "asked, where each stopped, files and PRs), search_coding_sessions to find "
+        "past sessions by what was asked or done, and wiki_page for the long-term notes compiled from daily activity. Times "
         "are local; durations are in minutes."
     ),
 )
@@ -289,6 +291,101 @@ def search_screen_text(query: str, since: Optional[str] = None, until: Optional[
                 "when": r["timestamp"][:16].replace("T", " "),
                 "app": r["app_name"],
                 "title": short(r["window_title"]),
+                "text": redact_highlighted(r["snippet"]),
+            }
+            for r in rows
+        ],
+    }
+
+
+def _session_range(since: Optional[str], until: Optional[str], default_days: int) -> tuple[datetime, datetime]:
+    end = parse_when(until, datetime.now() + timedelta(seconds=1))
+    if until and len(until.strip()) == 10:
+        end += timedelta(days=1)
+    return parse_when(since, _start_of(date.today() - timedelta(days=default_days - 1))), end
+
+
+def _relative(path: str, root: Optional[str]) -> str:
+    return path.removeprefix(root.rstrip("/") + "/") if root and path.startswith(root) else path
+
+
+@tool
+def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5) -> dict:
+    """Recent Claude Code sessions, newest first: title, project, folder,
+    branch, when, how many prompts, the latest turn recap (where it stopped),
+    the last few prompts, files edited and PRs opened. Use for 'where did I
+    leave off on X'. `project` filters by case-insensitive substring of the
+    project name or folder; `days` max 60."""
+    days = max(1, min(days, 60))
+    limit = max(1, min(limit, 25))
+    start, end = _session_range(None, None, days)
+    try:
+        rows = get_db().get_agent_sessions(start, end, 500 if project else limit * 2)
+    except sqlite3.OperationalError:
+        return {"error": "coding sessions aren't available yet (capture daemon hasn't run the upgrade)"}
+
+    pl = project.lower() if project else None
+    sessions = []
+    for r in rows:
+        if session_is_private(r):
+            continue
+        if pl and pl not in f"{r['project'] or ''} {r['cwd'] or ''}".lower():
+            continue
+        prompts = get_db().get_agent_prompts(r["session_id"], 5)
+        sessions.append({
+            "title": r["title"],
+            "project": r["project"],
+            "folder": r["cwd"],
+            "branch": r["branch"],
+            "started": (r["started_at"] or "")[:16].replace("T", " "),
+            "last_active": (r["ended_at"] or "")[:16].replace("T", " "),
+            "prompts": r["prompt_count"],
+            "status": redact_text(r["last_status"]),
+            "last_reply": None if r["last_status"] else redact_text(short(r["last_reply"], 600)),
+            "recent_prompts": [
+                {"at": p["timestamp"][:16].replace("T", " "), "text": redact_text(short(p["text"], 300))}
+                for p in prompts
+            ],
+            "files_edited": [_relative(f, r["cwd"]) for f in json.loads(r["files"] or "[]")[:10]],
+            "prs_opened": json.loads(r["prs"] or "[]"),
+        })
+        if len(sessions) >= limit:
+            break
+
+    return {"range": f"{start.date().isoformat()} to {date.today().isoformat()}",
+            "project_filter": project, "sessions": sessions}
+
+
+@tool
+def search_coding_sessions(query: str, since: Optional[str] = None, until: Optional[str] = None,
+                           limit: int = 15) -> dict:
+    """Search what was asked in Claude Code sessions (prompts) and how turns
+    ended (recaps). All words must appear; `since`/`until` work like
+    search_activity (default last 90 days). Best matches first; [brackets]
+    mark the matched words. Use coding_sessions(project=...) for the full
+    picture of a session found here."""
+    words = re.findall(r"\w+", query)
+    if not words:
+        return {"error": "query is empty"}
+    limit = max(1, min(limit, 40))
+    start, end = _session_range(since, until, 90)
+    match = " ".join(f'"{w}"' for w in words)
+    try:
+        rows = get_db().search_agent_messages(match, start, end, limit)
+    except sqlite3.OperationalError:
+        return {"error": "coding sessions aren't available yet (capture daemon hasn't run the upgrade)"}
+
+    return {
+        "query": query,
+        "range": f"{start.date().isoformat()} to {end.date().isoformat()}",
+        "hits": [
+            {
+                "when": r["timestamp"][:16].replace("T", " "),
+                "kind": r["kind"],
+                "session": r["title"],
+                "project": r["project"],
+                "folder": r["cwd"],
+                "branch": r["branch"],
                 "text": redact_highlighted(r["snippet"]),
             }
             for r in rows
