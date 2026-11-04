@@ -8,7 +8,7 @@ PYTHON_BIN := $(VENV)/bin/python
 DASHBOARD  := ui/dashboard
 NODE_MOD   := $(DASHBOARD)/node_modules
 
-.PHONY: setup start stop status dashboard capture menubar journal build-dashboard clean help
+.PHONY: setup start stop status dashboard capture menubar journal build-dashboard test clean help
 
 ## ── First-Time Setup ───────────────────────────────────────────
 
@@ -73,6 +73,10 @@ install: $(VENV)/bin/activate ## Install as macOS Launch Agent (auto-start on lo
 
 uninstall: $(VENV)/bin/activate ## Remove macOS Launch Agent
 	@$(PYTHON_BIN) main.py uninstall
+
+test: $(VENV)/bin/activate ## Run the test suite
+	@$(PIP) install -q -r requirements-dev.txt
+	@$(PYTHON_BIN) -m pytest -q tests
 
 ## ── Dashboard Development ──────────────────────────────────────
 
