@@ -16,6 +16,7 @@ Ever wonder where your day went? Retra runs silently in the background and gives
 - **Project Auto-Detection** — Parses project/repo names from VS Code, Cursor, terminal, and GitHub window titles
 - **Browser Context** — Captures actual URLs and domains when browsing, not just "Brave Browser"
 - **Screen Text** — Every 3 minutes, screenshots the active window only, reads its text on-device (Apple Vision), masks secrets, and keeps the text searchable. The image itself is deleted after 2 days
+- **Claude Code Sessions** — Reads your Claude Code session logs: per session, the project, branch, what you asked, where each turn ended, files edited and PRs opened, so agents can pick up where you left off
 - **Screenshot Dedup** — Skips capture when the screen hasn't changed
 - **Idle Detection** — Pauses tracking when you step away
 - **AI Reflections** — Daily summaries via Claude API or local Ollama with rich context (URLs, projects, patterns)
@@ -187,7 +188,7 @@ blocked_apps = ["1Password", "Keychain Access"]
 blocked_url_patterns = ["bank", "chase.com"]
 screenshot_skip_apps = ["Messages", "WhatsApp", "Signal", "Telegram", "FaceTime", "Passwords", "System Settings"]
 retention_days = 2             # screenshot images are deleted after this; their text is kept
-event_retention_days = 0       # events/URLs/screen text; 0 = keep forever (default)
+event_retention_days = 0       # events/URLs/screen text/coding sessions; 0 = keep forever (default)
 
 [categories]
 coding = ["VS Code", "Code", "Xcode", "Terminal", "iTerm", "PyCharm", "Cursor", "Warp"]
@@ -208,6 +209,10 @@ daily_notes_folder = "Retra"
 
 [dashboard]
 port = 5173
+
+[sources]
+claude_code = true             # read Claude Code session logs
+claude_code_dir = "~/.claude/projects"
 ```
 
 ## Project Structure
@@ -225,6 +230,7 @@ retra/
 │   ├── daemon.py               # Main capture loop (heartbeat, URL enrichment)
 │   ├── window_tracker.py       # macOS window tracking (CGWindowList API)
 │   ├── screenshot.py           # Screenshot capture + downscale + compression
+│   ├── claude_sessions.py      # Claude Code session logs as a source
 │   ├── idle_detector.py        # User idle detection via HIDIdleTime
 │   └── health.py               # Health check system (daemon alive, events flowing)
 ├── storage/
@@ -265,6 +271,8 @@ Every 3 seconds, the daemon:
 4. Records the event to SQLite (with dedup — skips identical consecutive events, records continuation heartbeats every 60s)
 5. Every 3 minutes, screenshots the active window only (`screencapture -l`), downscales to 1280px max width, and compresses it. Skipped for blocked apps/URLs, `screenshot_skip_apps`, and whenever a password field has focus (macOS Secure Input)
 6. A background worker reads the screenshot's text with Apple's Vision framework (on-device), masks emails, card numbers, API keys/tokens, passwords and one-time codes, and stores it in a full-text index. Images older than `retention_days` are deleted once their text is saved
+
+Every 5 minutes, another background worker re-reads any Claude Code session log (`~/.claude/projects/*/*.jsonl`) that changed. It keeps each session's folder (worktrees map back to their repo), project, branch, title, your prompts, the turn recaps, files edited, and PRs opened with `gh pr create`. Secrets are masked before anything is stored.
 
 ### Session Aggregation
 
@@ -341,6 +349,8 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `day_summary(day="today")` | Focus stats, projects, AI reflection, and the Obsidian daily note for one day |
 | `search_activity(query, since, until)` | When something was worked on, matched against window titles, URLs, and page titles |
 | `search_screen_text(query, since, until)` | What was on screen: full-text search over text read from screenshots, with snippets |
+| `coding_sessions(project=None, days=7)` | Recent Claude Code sessions: where each stopped, last prompts, files edited, PRs opened |
+| `search_coding_sessions(query, since, until)` | Find past Claude Code sessions by what was asked or how a turn ended |
 | `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
 | `wiki_page(name=None)` | A page from `retra-wiki/` in the vault (index when no name is given) |
 
@@ -377,7 +387,8 @@ Use absolute paths to the venv's Python so the client doesn't need your shell en
 - **Screenshots stay narrow and short-lived** — Only the active window, never private apps or password fields, text read on-device with secrets masked, image deleted after 2 days
 - **Blocklist** — Exclude sensitive apps and URLs from tracking
 - **`.env` for secrets** — API keys stored in `.env`, never committed
-- **Data retention** — Screenshot images auto-delete after 2 days; activity events and screen text are kept forever unless you set `event_retention_days`
+- **Claude Code sessions** — Only your prompts, turn recaps, the last reply, file paths and PR links are kept (not tool output or file contents), with secrets masked. Turn it off with `sources.claude_code = false`
+- **Data retention** — Screenshot images auto-delete after 2 days; activity events, screen text and coding sessions are kept forever unless you set `event_retention_days`
 - **Open source** — Audit every line of code
 
 ## Storage
@@ -386,6 +397,7 @@ Use absolute paths to the venv's Python so the client doesn't need your shell en
 | ---------------- | --------------- | -------------------------------------------- |
 | Screenshots      | ~10 MB total    | Only the last 2 days of images are kept      |
 | Screen text      | ~0.3 MB/day     | ~2 KB per capture, SQLite full-text index    |
+| Coding sessions  | ~5 KB/session   | Prompts and recaps, SQLite full-text index   |
 | Database         | ~1-2 MB/day     | SQLite with WAL mode                         |
 
 ## Contributing
