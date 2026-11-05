@@ -320,16 +320,14 @@ def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5
     limit = max(1, min(limit, 25))
     start, end = _session_range(None, None, days)
     try:
-        rows = get_db().get_agent_sessions(start, end, 500 if project else limit * 2)
+        # Extra rows leave room for sessions hidden by privacy settings.
+        rows = get_db().get_agent_sessions(start, end, limit * 4, project)
     except sqlite3.OperationalError:
         return {"error": "coding sessions aren't available yet (capture daemon hasn't run the upgrade)"}
 
-    pl = project.lower() if project else None
     sessions = []
     for r in rows:
         if session_is_private(r):
-            continue
-        if pl and pl not in f"{r['project'] or ''} {r['cwd'] or ''}".lower():
             continue
         prompts = get_db().get_agent_prompts(r["session_id"], 5)
         sessions.append({

@@ -108,6 +108,8 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
                 if text:
                     prompt_count += 1
                     messages.append((ts, "prompt", redact(text)[:MAX_PROMPT_CHARS]))
+                    # The stopping point is the latest turn's; older recaps stay in messages.
+                    last_status = last_reply = None
                 continue
 
             for block in content if isinstance(content, list) else []:
@@ -137,7 +139,7 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
         "cwd": repo,
         "project": _cwd_to_project_slug(repo) if repo else None,
         "branch": branch,
-        "title": title or next(t for _, k, t in messages if k == "prompt")[:100],
+        "title": redact(title)[:100] if title else next(t for _, k, t in messages if k == "prompt")[:100],
         "started_at": _local(started),
         "ended_at": _local(ended),
         "prompt_count": prompt_count,
@@ -187,6 +189,9 @@ def sync_sessions(db, logs_dir: Path, retention_days: int = 0,
         if parsed is None:
             continue
         session, messages = parsed
+        # mtime can be recent for an old session (copied log, renamed title).
+        if cutoff and session["ended_at"] and datetime.fromisoformat(session["ended_at"]) < cutoff:
+            continue
         session.update(log_path=str(path), log_size=stat.st_size, log_mtime=stat.st_mtime)
         db.save_agent_session(session, messages)
         saved += 1

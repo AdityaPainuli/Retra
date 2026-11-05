@@ -142,14 +142,19 @@ class ReadOnlyDatabase(Database):
             """, (HL_START, HL_END, match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
         return [dict(r) for r in rows if not is_private(r["app_name"], r["window_title"] or "")][:limit]
 
-    def get_agent_sessions(self, start: datetime, end: datetime, limit: int) -> list[dict]:
-        """Coding agent sessions active in [start, end), most recent first."""
+    def get_agent_sessions(self, start: datetime, end: datetime, limit: int,
+                           project: Optional[str] = None) -> list[dict]:
+        """Coding agent sessions active in [start, end), most recent first.
+        `project` matches a case-insensitive substring of project or folder."""
+        sql = "SELECT * FROM agent_sessions WHERE ended_at >= ? AND started_at < ?"
+        params: list = [start.isoformat(), end.isoformat()]
+        if project:
+            like = "%" + project.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            sql += (" AND (lower(coalesce(project, '')) LIKE ? ESCAPE '\\'"
+                    " OR lower(coalesce(cwd, '')) LIKE ? ESCAPE '\\')")
+            params += [like, like]
         with self._conn() as conn:
-            rows = conn.execute("""
-                SELECT * FROM agent_sessions
-                WHERE ended_at >= ? AND started_at < ?
-                ORDER BY ended_at DESC LIMIT ?
-            """, (start.isoformat(), end.isoformat(), limit)).fetchall()
+            rows = conn.execute(sql + " ORDER BY ended_at DESC LIMIT ?", (*params, limit)).fetchall()
         return [dict(r) for r in rows]
 
     def get_agent_prompts(self, session_id: str, limit: int) -> list[dict]:
