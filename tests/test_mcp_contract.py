@@ -11,15 +11,11 @@ import asyncio
 import json
 import os
 import re
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from mcp import Client
 
-from config.settings import ObsidianConfig, Settings
-from storage.database import Database
-from storage.models import WindowEvent
 
 ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT = ROOT / "tests" / "snapshots" / "mcp_contract.json"
@@ -27,45 +23,8 @@ GUIDE = ROOT / "skills" / "retra" / "SKILL.md"
 
 
 @pytest.fixture
-def server(tmp_path, monkeypatch):
-    """The real server, pointed at a fixture database and wiki, with call
-    logging captured instead of written to data/."""
-    db_path = tmp_path / "retra.db"
-    db = Database(db_path)
-    now = datetime.now().replace(microsecond=0)
-    for i in range(6):
-        db.insert_event(WindowEvent(
-            timestamp=now - timedelta(minutes=30 - i * 5), app_name="Code",
-            window_title="server.py - retra", category="development", project_hint="retra",
-        ))
-    db.save_agent_session({
-        "session_id": "s1", "source": "claude-code", "cwd": "/work/retra", "project": "retra",
-        "branch": "main", "title": "Add contract test", "started_at": (now - timedelta(hours=1)).isoformat(),
-        "ended_at": now.isoformat(), "prompt_count": 1, "files": "[]", "prs": "[]",
-        "last_status": "Snapshot written", "last_reply": None, "log_path": "/x.jsonl",
-        "log_size": 1, "log_mtime": 1.0,
-    }, [((now - timedelta(minutes=50)).isoformat(), "prompt", "write the contract test")])
-
-    # Default settings, not the local config: fixed privacy rules, and a vault in tmp_path so
-    # day_summary and wiki_page never read the developer's real notes.
-    vault = tmp_path / "vault"
-    settings = Settings(obsidian=ObsidianConfig(vault_path=str(vault)))
-    settings.obsidian.output_dir.mkdir(parents=True)
-    (settings.obsidian.output_dir / f"{date.today().isoformat()}.md").write_text("Fixture note\n")
-    wiki = vault / "retra-wiki"
-    (wiki / "projects").mkdir(parents=True)
-    (wiki / "projects" / "retra.md").write_text("# Retra\n")
-
-    from config import settings as settings_mod
-    from mcp_server import server as srv, store
-    monkeypatch.setattr(settings_mod, "_settings", settings)
-    monkeypatch.setenv("RETRA_DB_PATH", str(db_path))
-    monkeypatch.setattr(store, "_db", None)
-    calls = []
-    monkeypatch.setattr(srv, "log_call", lambda tool, client, args, **kw: calls.append((tool, client, kw["ok"])))
-    srv.logged_calls = calls
-    yield srv.mcp
-    monkeypatch.setattr(store, "_db", None)
+def server(retra):
+    return retra.mcp
 
 
 def _run(coro):
@@ -154,6 +113,7 @@ def test_instructions_cover_every_tool(server):
 
 
 SMOKE_CALLS = {
+    "get_status": {},
     "current_activity": {},
     "recent_work": {"days": 1},
     "day_summary": {"day": "today"},
@@ -166,8 +126,7 @@ SMOKE_CALLS = {
 }
 
 
-def test_every_tool_answers_on_fixture_db(server):
-    from mcp_server import server as srv
+def test_every_tool_answers_on_fixture_db(server, retra):
 
     async def call_all():
         async with Client(server) as client:
@@ -188,5 +147,5 @@ def test_every_tool_answers_on_fixture_db(server):
     assert [s["title"] for s in sessions] == ["Add contract test"], "not reading the fixture DB"
     assert json.loads(results["search_activity"].content[0].text)["hits"], "fixture event not found"
     assert json.loads(results["search_coding_sessions"].content[0].text)["hits"], "fixture session not found"
-    assert [c[0] for c in srv.logged_calls] == list(SMOKE_CALLS)
-    assert all(ok for _, _, ok in srv.logged_calls)
+    assert [c[0] for c in retra.calls] == list(SMOKE_CALLS)
+    assert all(ok for _, _, ok in retra.calls)

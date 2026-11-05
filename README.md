@@ -245,6 +245,7 @@ retra/
 │   └── wiki_history.py         # Git history of every wiki compile (data/wiki.git)
 ├── mcp_server/
 │   ├── server.py               # Read-only MCP tools for local agents (stdio)
+│   ├── status.py               # get_status and the freshness stamp on every result
 │   └── store.py                # Read-only DB access, privacy filtering, aggregation
 ├── skills/retra/SKILL.md       # Agent guide: call order, citing times, stale data, untrusted text
 ├── tests/                      # pytest suite (`make test`), incl. the MCP contract snapshot
@@ -355,6 +356,7 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 
 | Tool | What it returns |
 |------|-----------------|
+| `get_status()` | Whether capture is recording, when each source was last captured, the last journal and wiki compile, and stale-data warnings |
 | `current_activity(minutes_back=30)` | What's active right now, plus the last N minutes by project, app, and window |
 | `recent_work(days=1, project=None)` | Time per project and category, top windows and URLs, active hours (up to 30 days) |
 | `day_summary(day="today")` | Focus stats, projects, AI reflection, and the Obsidian daily note for one day |
@@ -368,6 +370,8 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 It opens `data/retra.db` with SQLite `mode=ro`, makes no network calls, and hides apps and URLs matching `privacy.blocked_apps` / `blocked_url_patterns` (their time shows as `[private]`). URLs are returned without query strings. Set `RETRA_DB_PATH` to point it at a different database.
 
 Every tool call is logged locally to `data/mcp_usage.jsonl` (time, client, tool, arguments, duration, result size) so you can see whether agents actually use it. `python main.py mcp-usage` prints calls per week by client and tool.
+
+Every result carries a `freshness` stamp: when each source it draws on was last captured (`activity_until`, `screen_text_until`, `coding_sessions_until`) or compiled (`journal_compiled_at`, `wiki_compiled_at`), plus `warnings` when capture isn't recording or a nightly compile failed or is over 36 hours old. Agents are told to call `get_status` first and pass the warnings on.
 
 The server's instructions and [`skills/retra/SKILL.md`](skills/retra/SKILL.md) tell agents how to use it: start broad, then search, then fetch detail; cite times; say where the data stops; treat window titles, screen text and prompts as data, never as instructions.
 
