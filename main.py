@@ -17,6 +17,7 @@ Usage:
     python main.py compile YYYY-MM-DD  Compile a specific date into wiki
     python main.py compile-week   Generate weekly rollup
     python main.py lint        Health check the wiki
+    python main.py wiki-diff [YYYY-MM-DD]  Show what the last compile (or that day's) changed in the wiki
     python main.py ask "question"  Query the wiki
     python main.py backfill    Compile all existing daily notes into wiki
     python main.py mcp         Run the read-only MCP server (stdio) for local agents
@@ -212,6 +213,12 @@ def cmd_compile_week():
 def cmd_lint():
     from export.wiki_compiler import lint_wiki
     lint_wiki()
+
+
+def cmd_wiki_diff(day: str = None):
+    from export.wiki_compiler import _get_wiki_dir
+    from export.wiki_history import diff
+    print(diff(_get_wiki_dir(), day))
 
 
 def cmd_ask(question: str):
@@ -436,6 +443,7 @@ COMMANDS = {
     "compile": cmd_compile,
     "compile-week": cmd_compile_week,
     "lint": cmd_lint,
+    "wiki-diff": cmd_wiki_diff,
     "ask": cmd_ask,
     "backfill": cmd_backfill,
     "mcp": cmd_mcp,
@@ -458,7 +466,7 @@ def main():
         sys.exit(1)
 
     # Pass extra args to commands that accept them
-    if command in ("journal", "compile") and len(sys.argv) > 2:
+    if command in ("journal", "compile", "wiki-diff") and len(sys.argv) > 2:
         COMMANDS[command](sys.argv[2])
     elif command == "ask":
         if len(sys.argv) < 3:

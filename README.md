@@ -128,6 +128,7 @@ make start      # Start everything (capture + dashboard + menubar)
 make stop       # Stop all processes
 make status     # Show recording health and today's stats
 make journal    # Generate today's Obsidian journal
+make test       # Run the test suite
 make help       # Show all available commands
 ```
 
@@ -165,6 +166,7 @@ python main.py start
 | `python main.py compile YYYY-MM-DD` | Compile a specific date into wiki                       |
 | `python main.py compile-week`       | Generate weekly rollup                                  |
 | `python main.py lint`               | Health check the wiki                                   |
+| `python main.py wiki-diff [date]`   | Show what the last compile (or that day's) changed      |
 | `python main.py ask "question"`     | Query the wiki with a question                          |
 | `python main.py backfill`           | Compile all existing daily notes into wiki              |
 | `python main.py mcp`                | Run the read-only MCP server (stdio) for local agents   |
@@ -239,10 +241,12 @@ retra/
 ├── export/
 │   ├── obsidian.py             # Markdown journal generation (auto-triggers wiki compile)
 │   ├── summarizer.py           # AI summary (Claude/Ollama) + project detection
-│   └── wiki_compiler.py        # LLM wiki compiler (ingest, rollup, lint, query)
+│   ├── wiki_compiler.py        # LLM wiki compiler (ingest, rollup, lint, query)
+│   └── wiki_history.py         # Git history of every wiki compile (data/wiki.git)
 ├── mcp_server/
 │   ├── server.py               # Read-only MCP tools for local agents (stdio)
 │   └── store.py                # Read-only DB access, privacy filtering, aggregation
+├── tests/                      # pytest suite (`make test`)
 ├── ui/
 │   ├── server.py               # FastAPI server (30+ endpoints)
 │   ├── menubar.py              # macOS menubar app with health indicator
@@ -328,6 +332,12 @@ Obsidian Vault/
 3. Claude updates project pages, pattern tracking, learning logs, and people pages
 4. On Sundays, a weekly rollup is auto-generated
 5. `python main.py install` schedules the full pipeline (journal + compile) daily at 23:00
+
+**Safety and history:** the compile prompt includes window titles and screen text, so the LLM's output isn't trusted to pick file paths. Only `<category>/<name>.md` pages inside the folders above are written; anything else (`..`, absolute paths, `CLAUDE.md`, symlinks out of the wiki) is rejected and logged. After every compile, lint or saved query, the wiki is committed to a git repo kept in `data/wiki.git` (nothing is added to your vault), so a bad compile never loses a page. `python main.py wiki-diff [YYYY-MM-DD]` shows what changed; to restore a page:
+
+```bash
+git --git-dir=data/wiki.git --work-tree=<vault>/retra-wiki checkout <commit> -- projects/<page>.md
+```
 
 **Querying the wiki:**
 
