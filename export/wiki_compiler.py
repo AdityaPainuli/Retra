@@ -83,10 +83,7 @@ def compile_daily_note(target_date: date = None):
     if response:
         # _apply_wiki_updates rebuilds index.md; log.md is ours too, so the
         # LLM can never silently drop either.
-        written = _apply_wiki_updates(wiki_dir, response)
-        summary = _summarize_written(written)
-        _append_log_entry(wiki_dir, target_date, kind="ingest", summary=summary)
-        wiki_history.commit(wiki_dir, f"ingest {target_date.isoformat()}: {summary}")
+        _write_and_record(wiki_dir, response, "ingest", target_date)
         print(f"[Retra] Wiki compiled for {target_date}")
         pipeline_status.record("wiki", ok=True)
 
@@ -136,10 +133,7 @@ def compile_week(end_date: date = None):
     response = _call_claude(prompt)
 
     if response:
-        written = _apply_wiki_updates(wiki_dir, response)
-        summary = _summarize_written(written)
-        _append_log_entry(wiki_dir, end_date, kind="weekly-rollup", summary=summary)
-        wiki_history.commit(wiki_dir, f"weekly-rollup {end_date.isoformat()}: {summary}")
+        _write_and_record(wiki_dir, response, "weekly-rollup", end_date)
         print(f"[Retra] Weekly rollup compiled")
     else:
         print(f"[Retra] Weekly rollup failed")
@@ -169,8 +163,7 @@ def lint_wiki():
         elif "===FILE:" not in response:
             print(response)
 
-        written = _apply_wiki_updates(wiki_dir, response)
-        wiki_history.commit(wiki_dir, f"lint {date.today().isoformat()}: {_summarize_written(written)}")
+        _write_and_record(wiki_dir, response, "lint", date.today(), log_entry=False)
         print(f"[Retra] Wiki lint complete")
     else:
         print(f"[Retra] Wiki lint failed")
@@ -256,8 +249,7 @@ OUTPUT FORMAT for saved insights:
 
         # Save any insight files
         if "===FILE:" in response:
-            written = _apply_wiki_updates(wiki_dir, response)
-            wiki_history.commit(wiki_dir, f"query {date.today().isoformat()}: {_summarize_written(written)}")
+            _write_and_record(wiki_dir, response, "query", date.today(), log_entry=False)
             print("\n[Retra] Insight saved to wiki.")
     else:
         print("[Retra] Query failed")
@@ -541,6 +533,22 @@ def _call_claude(prompt: str) -> Optional[str]:
     return text or None
 
 
+def _write_and_record(wiki_dir: Path, response: str, kind: str, when: date,
+                      log_entry: bool = True) -> list[str]:
+    """Apply an LLM response and keep both sides in history: the wiki as it
+    was (first compile, or edits made in Obsidian since the last one), then
+    the result. Holds the wiki lock throughout so concurrent compiles from
+    other processes can't interleave."""
+    with wiki_history.lock():
+        wiki_history.commit(wiki_dir, f"before {kind} {when.isoformat()}: earlier state and manual edits")
+        written = _apply_wiki_updates(wiki_dir, response)
+        summary = _summarize_written(written)
+        if log_entry:
+            _append_log_entry(wiki_dir, when, kind=kind, summary=summary)
+        wiki_history.commit(wiki_dir, f"{kind} {when.isoformat()}: {summary}")
+    return written
+
+
 def _apply_wiki_updates(wiki_dir: Path, response: str) -> list[str]:
     """Parse the LLM response and write files. Returns list of relpaths written.
 
@@ -593,7 +601,9 @@ def _safe_wiki_path(wiki_dir: Path, filepath: str) -> Optional[Path]:
     """The file to write for an LLM-provided path, or None unless it is
     exactly `<category>/<name>.md` and resolves inside that category (no
     `..`, absolute paths or symlinks out)."""
-    parts = filepath.replace("\\", "/").split("/")
+    if "\\" in filepath:
+        return None  # never normalize: the project-slug check reads the raw path
+    parts = filepath.split("/")
     if len(parts) != 2 or parts[0] not in _CATEGORY_DIRS or not _PAGE_NAME_RE.match(parts[1]):
         return None
     root = wiki_dir.resolve()

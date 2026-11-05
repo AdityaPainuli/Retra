@@ -1,12 +1,15 @@
 """Wiki writes stay inside the wiki, and every compile is kept in history."""
 
+import fcntl
 import os
 import shutil
+
+from datetime import date
 
 import pytest
 
 from export import wiki_history
-from export.wiki_compiler import _apply_wiki_updates
+from export.wiki_compiler import _apply_wiki_updates, _write_and_record
 
 
 def _response(files: dict[str, str]) -> str:
@@ -28,6 +31,7 @@ def wiki(tmp_path):
     "projects/../../x.md",
     "projects/../CLAUDE.md",
     "projects\\..\\..\\x.md",
+    "projects\\Free.md",
     "CLAUDE.md",
     "notes/x.md",
     "projects/x.txt",
@@ -80,3 +84,38 @@ def test_history_keeps_every_compile(wiki, tmp_path):
     assert page.read_text() == "launch friday\n"
     assert not (wiki / ".git").exists()  # history lives outside the vault
     assert "-launch friday" in wiki_history.diff(wiki, git_dir=git_dir)
+
+
+@pytest.fixture
+def history(tmp_path, monkeypatch):
+    git_dir = tmp_path / "wiki.git"
+    monkeypatch.setattr(wiki_history, "WIKI_GIT_DIR", git_dir)
+    monkeypatch.setattr(wiki_history, "WIKI_LOCK_PATH", tmp_path / "wiki.lock")
+    return git_dir
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_compile_keeps_state_from_before_it(wiki, history):
+    page = wiki / "projects" / "retra.md"
+    page.write_text("fact the LLM will drop\n")  # existing page, never committed
+
+    _write_and_record(wiki, _response({"projects/retra.md": "rewritten"}), "ingest", date(2026, 11, 1))
+    page.write_text("my edit in obsidian\n")
+    _write_and_record(wiki, _response({"projects/retra.md": "rewritten again"}), "ingest", date(2026, 11, 2))
+
+    log = wiki_history._git(wiki, "log", "--format=%s", git_dir=history).stdout.splitlines()
+    assert [m.split(":")[0] for m in log] == [
+        "ingest 2026-11-02", "before ingest 2026-11-02", "ingest 2026-11-01", "before ingest 2026-11-01",
+    ]
+    for rev, text in (("HEAD~3", "fact the LLM will drop"), ("HEAD~1", "my edit in obsidian")):
+        shown = wiki_history._git(wiki, "show", f"{rev}:projects/retra.md", git_dir=history).stdout
+        assert shown.strip() == text
+
+
+def test_lock_is_exclusive_across_processes(history):
+    with wiki_history.lock():
+        with wiki_history.WIKI_LOCK_PATH.open("w") as other:  # separate open file = separate lock
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with wiki_history.WIKI_LOCK_PATH.open("w") as other:
+        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released after the block

@@ -8,17 +8,37 @@ folder as its work tree. Nothing is added to the Obsidian vault, and any page
 can be diffed or restored with plain git.
 """
 
+import fcntl
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from config.settings import DATA_DIR
 
 WIKI_GIT_DIR = DATA_DIR / "wiki.git"
+WIKI_LOCK_PATH = DATA_DIR / "wiki.lock"
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's well-known empty tree
 
 
-def _git(wiki_dir: Path, *args: str, git_dir: Path = WIKI_GIT_DIR) -> subprocess.CompletedProcess:
+@contextmanager
+def lock(lock_path: Optional[Path] = None) -> Iterator[None]:
+    """Hold the wiki for one writer at a time, across processes (the nightly
+    job, dashboard and menubar can all compile). Wrap everything from the
+    pre-write snapshot to the final commit, so one compile's pages can't be
+    committed under another's message."""
+    path = lock_path or WIKI_LOCK_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _git(wiki_dir: Path, *args: str, git_dir: Optional[Path] = None) -> subprocess.CompletedProcess:
+    git_dir = git_dir or WIKI_GIT_DIR
     return subprocess.run(
         ["git", f"--git-dir={git_dir}", f"--work-tree={wiki_dir}",
          "-c", "user.name=Retra", "-c", "user.email=retra@localhost", *args],
@@ -26,10 +46,11 @@ def _git(wiki_dir: Path, *args: str, git_dir: Path = WIKI_GIT_DIR) -> subprocess
     )
 
 
-def commit(wiki_dir: Path, message: str, git_dir: Path = WIKI_GIT_DIR) -> Optional[str]:
+def commit(wiki_dir: Path, message: str, git_dir: Optional[Path] = None) -> Optional[str]:
     """Commit the wiki's current state. Returns the short commit id, or None
     when nothing changed or git failed (never raises: history is a bonus,
     not a reason to fail a compile)."""
+    git_dir = git_dir or WIKI_GIT_DIR
     try:
         if not (git_dir / "HEAD").exists():
             if _git(wiki_dir, "init", "-q", git_dir=git_dir).returncode != 0:
@@ -45,9 +66,10 @@ def commit(wiki_dir: Path, message: str, git_dir: Path = WIKI_GIT_DIR) -> Option
         return None
 
 
-def diff(wiki_dir: Path, day: Optional[str] = None, git_dir: Path = WIKI_GIT_DIR) -> str:
+def diff(wiki_dir: Path, day: Optional[str] = None, git_dir: Optional[Path] = None) -> str:
     """What compiles changed: the latest commit, or every commit made on
     `day` (YYYY-MM-DD)."""
+    git_dir = git_dir or WIKI_GIT_DIR
     if not (git_dir / "HEAD").exists():
         return "No wiki history yet (it starts with the next compile)."
     if day:
