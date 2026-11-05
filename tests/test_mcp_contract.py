@@ -11,12 +11,13 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from mcp import Client
 
+from config.settings import ObsidianConfig, Settings
 from storage.database import Database
 from storage.models import WindowEvent
 
@@ -45,14 +46,21 @@ def server(tmp_path, monkeypatch):
         "log_size": 1, "log_mtime": 1.0,
     }, [((now - timedelta(minutes=50)).isoformat(), "prompt", "write the contract test")])
 
-    wiki = tmp_path / "retra-wiki"
+    # Default settings, not the local config: fixed privacy rules, and a vault in tmp_path so
+    # day_summary and wiki_page never read the developer's real notes.
+    vault = tmp_path / "vault"
+    settings = Settings(obsidian=ObsidianConfig(vault_path=str(vault)))
+    settings.obsidian.output_dir.mkdir(parents=True)
+    (settings.obsidian.output_dir / f"{date.today().isoformat()}.md").write_text("Fixture note\n")
+    wiki = vault / "retra-wiki"
     (wiki / "projects").mkdir(parents=True)
     (wiki / "projects" / "retra.md").write_text("# Retra\n")
 
+    from config import settings as settings_mod
     from mcp_server import server as srv, store
+    monkeypatch.setattr(settings_mod, "_settings", settings)
     monkeypatch.setenv("RETRA_DB_PATH", str(db_path))
     monkeypatch.setattr(store, "_db", None)
-    monkeypatch.setattr(srv, "_wiki_dir", lambda: wiki)
     calls = []
     monkeypatch.setattr(srv, "log_call", lambda tool, client, args, **kw: calls.append((tool, client, kw["ok"])))
     srv.logged_calls = calls
@@ -109,29 +117,35 @@ def test_ctx_is_hidden_from_agents(server):
         assert "ctx" not in (t.input_schema or {}).get("properties", {}), t.name
 
 
-def _readme_entry(tool: str) -> str:
-    """The tool's row in the README's MCP table."""
-    text = (ROOT / "README.md").read_text()
-    return next((line for line in text.splitlines() if line.startswith(f"| `{tool}(")), "")
+def _readme_params(tool: str):
+    """Params in the tool's signature in the README's MCP table, or None."""
+    m = re.search(rf"^\| `{tool}\(([^)]*)\)`", (ROOT / "README.md").read_text(), re.M)
+    return None if m is None else {a.split("=")[0].strip() for a in m.group(1).split(",") if a.strip()}
 
 
-def _guide_entry(tool: str) -> str:
-    """The tool's section in skills/retra/SKILL.md."""
-    match = re.search(rf"^### {tool}\n(.*?)(?=^#|\Z)", GUIDE.read_text(), re.M | re.S)
-    return match.group(1) if match else ""
+def _guide_params(tool: str):
+    """Params in the bullets of the tool's section in skills/retra/SKILL.md, or None."""
+    m = re.search(rf"^### {tool}\n(.*?)(?=^#|\Z)", GUIDE.read_text(), re.M | re.S)
+    if m is None:
+        return None
+    bullets = re.findall(r"^- ((?:`\w+`(?:, )?)+)", m.group(1), re.M)
+    return {name for b in bullets for name in re.findall(r"`(\w+)`", b)}
 
 
-@pytest.mark.parametrize("entry", [_readme_entry, _guide_entry], ids=["README", "SKILL"])
-def test_every_tool_and_param_is_documented(server, entry):
-    missing = []
+@pytest.mark.parametrize("documented", [_readme_params, _guide_params], ids=["README", "SKILL"])
+def test_every_tool_and_param_is_documented(server, documented):
+    problems = []
     for t in _run(_list_tools(server)):
-        doc = entry(t.name)
-        if not doc:
-            missing.append(t.name)
-            continue
-        missing += [f"{t.name}({p})" for p in (t.input_schema or {}).get("properties", {})
-                    if not re.search(rf"\b{p}\b", doc)]
-    assert not missing, f"not documented: {', '.join(missing)}"
+        params = set((t.input_schema or {}).get("properties", {}))
+        doc = documented(t.name)
+        if doc is None:
+            problems.append(f"{t.name} missing")
+        elif doc != params:
+            if params - doc:
+                problems.append(f"{t.name} undocumented: {sorted(params - doc)}")
+            if doc - params:
+                problems.append(f"{t.name} documents unknown: {sorted(doc - params)}")
+    assert not problems, "; ".join(problems)
 
 
 def test_instructions_cover_every_tool(server):
@@ -167,6 +181,9 @@ def test_every_tool_answers_on_fixture_db(server):
         body = json.loads(res.content[0].text)
         assert "error" not in body, f"{name}: {body['error']}"
 
+    assert "Fixture note" in (json.loads(results["day_summary"].content[0].text)["obsidian_note"] or ""), \
+        "day_summary didn't read the fixture vault"
+    assert "Retra" in json.loads(results["wiki_page"].content[0].text)["content"]
     sessions = json.loads(results["coding_sessions"].content[0].text)["sessions"]
     assert [s["title"] for s in sessions] == ["Add contract test"], "not reading the fixture DB"
     assert json.loads(results["search_activity"].content[0].text)["hits"], "fixture event not found"
