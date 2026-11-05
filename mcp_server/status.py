@@ -26,7 +26,9 @@ HEARTBEAT_STALE_SEC = 45
 COMPILE_STALE_HOURS = 36
 
 RAW_SOURCES = ("activity", "screen_text", "coding_sessions")
-COMPILED_SOURCES = {"journal": "journal", "wiki": "wiki"}  # source -> pipeline stage
+# Nightly pipeline stages, each with the name used in warnings. ai_summary can
+# fail while the journal and wiki succeed, leaving day_summary without a reflection.
+COMPILED_SOURCES = {"journal": "daily journal", "ai_summary": "AI reflection", "wiki": "wiki"}
 
 _LATEST_SQL = {
     "activity": "SELECT MAX(timestamp) FROM window_events",
@@ -44,8 +46,10 @@ def _latest(source: str) -> Optional[str]:
     try:
         with get_db()._conn() as conn:
             row = conn.execute(_LATEST_SQL[source]).fetchone()
-    except sqlite3.Error:
-        return None  # table missing until the daemon runs that upgrade
+    except (sqlite3.Error, OSError):
+        # No database yet (daemon never ran) or a table the daemon hasn't
+        # created yet: report no data rather than failing the whole status.
+        return None
     return _fmt(row[0]) if row else None
 
 
@@ -86,6 +90,7 @@ def _pipeline() -> dict:
 
 
 def _compile_warning(source: str, entry: Optional[dict]) -> Optional[str]:
+    source = COMPILED_SOURCES[source]
     if not entry or not entry.get("last_success"):
         return f"The {source} has never compiled successfully."
     if entry.get("ok") is False:
@@ -113,7 +118,7 @@ def freshness(sources: tuple[str, ...]) -> dict:
     if compiled:
         pipe = _pipeline()
         for s in compiled:
-            entry = pipe.get(COMPILED_SOURCES[s])
+            entry = pipe.get(s)
             out[f"{s}_compiled_at"] = entry.get("last_success") if entry else None
             if w := _compile_warning(s, entry):
                 warnings.append(w)
@@ -130,8 +135,8 @@ def status() -> dict:
     if not cap["recording"]:
         warnings.append(f"Capture isn't recording (last heartbeat {cap['last_heartbeat'] or 'never'}). "
                         "Activity, screen text and coding sessions stop at the times in 'latest'.")
-    for s, stage in COMPILED_SOURCES.items():
-        if w := _compile_warning(s, pipe.get(stage)):
+    for s in COMPILED_SOURCES:
+        if w := _compile_warning(s, pipe.get(s)):
             warnings.append(w)
     try:
         size_mb = round(db_path().stat().st_size / 1_048_576, 1)

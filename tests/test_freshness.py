@@ -33,7 +33,7 @@ def test_results_carry_freshness(retra):
     assert f == {"activity_until": (retra.now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")}
 
     f = _call(retra, "day_summary")["freshness"]
-    assert set(f) == {"activity_until", "journal_compiled_at"}
+    assert set(f) == {"activity_until", "journal_compiled_at", "ai_summary_compiled_at"}
 
     f = _call(retra, "wiki_page", {"name": "retra"})["freshness"]
     assert f == {"wiki_compiled_at": (retra.now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")}
@@ -65,3 +65,28 @@ def test_failed_and_old_compiles_warn(retra):
     write_pipeline(retra.pipeline, retra.now - timedelta(days=3))
     assert any("misses activity" in w for w in _call(retra, "get_status")["warnings"])
     assert "warnings" not in _call(retra, "recent_work")["freshness"]
+
+
+def test_failed_ai_summary_warns_even_when_journal_and_wiki_succeed(retra):
+    stamp = retra.now.isoformat(timespec="seconds")
+    ok = {"ok": True, "last_run": stamp, "last_success": stamp}
+    failed = {"ok": False, "last_run": stamp, "last_success": (retra.now - timedelta(days=1)).isoformat(timespec="seconds"),
+              "error": "rate limited"}
+    retra.pipeline.write_text(json.dumps({"journal": ok, "ai_summary": failed, "wiki": ok}))
+
+    warnings = _call(retra, "get_status")["warnings"]
+    assert len(warnings) == 1 and "AI reflection compile failed" in warnings[0]
+    assert any("AI reflection" in w for w in _call(retra, "day_summary")["freshness"]["warnings"])
+    assert "warnings" not in _call(retra, "wiki_page", {"name": "retra"})["freshness"]
+
+
+def test_status_works_before_the_database_exists(retra, monkeypatch, tmp_path):
+    from mcp_server import store
+    monkeypatch.setenv("RETRA_DB_PATH", str(tmp_path / "missing.db"))
+    monkeypatch.setattr(store, "_db", None)
+
+    s = _call(retra, "get_status")
+    assert "error" not in s
+    assert s["latest"] == {"activity": None, "screen_text": None, "coding_sessions": None}
+    assert s["capture"]["recording"] is True and s["pipeline"]["wiki"]["ok"] is True
+    assert s["db_size_mb"] is None

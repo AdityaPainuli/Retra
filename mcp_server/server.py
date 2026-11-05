@@ -191,7 +191,7 @@ def recent_work(days: int = 1, project: Optional[str] = None) -> dict:
     }
 
 
-@tool("activity", "journal")
+@tool("activity", "journal", "ai_summary")
 def day_summary(day: str = "today") -> dict:
     """Stats for one day (YYYY-MM-DD, 'today' or 'yesterday'): focus score,
     category minutes, projects, top titles, the saved AI reflection if one
