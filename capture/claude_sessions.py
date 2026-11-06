@@ -28,7 +28,19 @@ _EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 _RECAP_TOOL = "mcp__ccd_turn__wrap_up"
 # Scratch files an agent writes along the way aren't part of the work.
 _SCRATCH_DIRS = ("/tmp/", "/private/tmp/", "/private/var/folders/", "/var/folders/")
-_PR_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+# `gh pr create` prints the new PR's URL on a line of its own, sometimes behind
+# a short label the command adds ("admin: <url>"). Only such lines count:
+# other output (a test run, `gh pr list`) can mention many PRs. Read results
+# prefix each line with its number.
+_PR_LINE_RE = re.compile(
+    r"^(?:\s*\d+\t)?(?:[\w .-]{1,30}:\s*)?(https://github\.com/[\w.-]+/[\w.-]+/pull/\d+)\s*$", re.M)
+# The command must run `gh pr create` (at the start of a line or after ;, &&,
+# || or a pipe), not just mention it: a script that edits this parser has the
+# phrase inside a string.
+_PR_CREATE_RE = re.compile(r"(?:^|[;&|(])\s*gh\s+pr\s+create\b", re.M)
+# A long command is moved to the background; its output lands in a file that
+# is read later, so the PR URL shows up in that later read.
+_BACKGROUND_RE = re.compile(r"Output is being written to: (\S+?\.output)")
 _COMMAND_RE = re.compile(r"<command-name>(.*?)</command-name>(?:.*?<command-args>(.*?)</command-args>)?", re.S)
 # Injected text that shows up as a "user" message but wasn't typed by the user.
 _NOT_A_PROMPT = (
@@ -63,6 +75,18 @@ def _repo_dir(cwd: str) -> str:
     return re.split(r"/\.claude/worktrees/", cwd, maxsplit=1)[0]
 
 
+def _runs_pr_create(command: str) -> bool:
+    return bool(_PR_CREATE_RE.search(command))
+
+
+def _result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return ""
+
+
 def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]]]:
     """Read one session log. Returns (session row, messages) or None when the
     session has no prompts (e.g. opened and closed)."""
@@ -70,7 +94,8 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
     started = ended = None
     files: dict[str, str] = {}
     prs: list[str] = []
-    pr_creates: set[str] = set()  # tool_use ids of `gh pr create` calls
+    pr_creates: set[str] = set()  # tool_use ids whose result holds a new PR's URL
+    pr_outputs: set[str] = set()  # output files of backgrounded `gh pr create` calls
     messages: list[tuple[str, str, str]] = []
     prompt_count = 0
 
@@ -99,9 +124,11 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
                     for block in content:
                         if (isinstance(block, dict) and block.get("type") == "tool_result"
                                 and block.get("tool_use_id") in pr_creates):
-                            for url in _PR_RE.findall(json.dumps(block.get("content"))):
+                            result = _result_text(block.get("content"))
+                            for url in _PR_LINE_RE.findall(result):
                                 if url not in prs:
                                     prs.append(url)
+                            pr_outputs.update(_BACKGROUND_RE.findall(result))
                 if entry.get("isMeta"):
                     continue
                 text = _prompt_text(content)
@@ -123,7 +150,12 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
                             and not args["file_path"].startswith(_SCRATCH_DIRS)):
                         files.pop(args["file_path"], None)
                         files[args["file_path"]] = ts  # keeps most recent last
-                    elif name == "Bash" and "gh pr create" in str(args.get("command", "")):
+                    elif name == "Bash" and _runs_pr_create(str(args.get("command", ""))):
+                        pr_creates.add(block.get("id"))
+                    elif pr_outputs and (
+                        (name == "Bash" and any(p in str(args.get("command", "")) for p in pr_outputs))
+                        or (name == "Read" and args.get("file_path") in pr_outputs)
+                    ):
                         pr_creates.add(block.get("id"))
                     elif name == _RECAP_TOOL and args.get("recap"):
                         last_status = redact(args["recap"])
