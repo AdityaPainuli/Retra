@@ -360,10 +360,10 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `current_activity(minutes_back=30)` | What's active right now, plus the last N minutes by project, app, and window |
 | `recent_work(days=1, project=None)` | Time per project and category, top windows and URLs, active hours (up to 30 days) |
 | `day_summary(day="today")` | Focus stats, projects, AI reflection, and the Obsidian daily note for one day |
-| `search_activity(query, since, until, limit=20)` | When something was worked on, matched against window titles, URLs, and page titles |
-| `search_screen_text(query, since, until, limit=15)` | What was on screen: full-text search over text read from screenshots, with snippets |
-| `coding_sessions(project=None, days=7, limit=5)` | Recent Claude Code sessions: where each stopped, last prompts, files edited, PRs opened |
-| `search_coding_sessions(query, since, until, limit=15)` | Find past Claude Code sessions by what was asked or how a turn ended |
+| `search_activity(query, since, until, limit=20, offset=0)` | When something was worked on, matched against window titles, URLs, and page titles |
+| `search_screen_text(query, since, until, limit=15, offset=0)` | What was on screen: full-text search over text read from screenshots, with snippets |
+| `coding_sessions(project=None, days=7, limit=5, offset=0)` | Recent Claude Code sessions: where each stopped, last prompts, files edited, PRs opened |
+| `search_coding_sessions(query, since, until, limit=15, offset=0)` | Find past Claude Code sessions by what was asked or how a turn ended |
 | `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
 | `wiki_page(name=None)` | A page from `retra-wiki/` in the vault (index when no name is given) |
 

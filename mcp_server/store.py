@@ -26,6 +26,18 @@ from storage.models import WindowEvent
 
 PRIVATE = "[private]"
 
+# Paging: list tools take `offset` and return `has_more` / `next_offset`. A
+# search ranks at most MAX_RESULTS matches; past that, narrow since/until.
+MAX_RESULTS = 1000
+
+
+def page(items: list, offset: int, limit: int) -> tuple[list, dict]:
+    """One page of `items` plus the paging fields every list tool returns."""
+    offset = max(0, min(offset, MAX_RESULTS))
+    more = len(items) > offset + limit
+    return items[offset:offset + limit], {"offset": offset, "has_more": more,
+                                          "next_offset": offset + limit if more else None}
+
 
 class ReadOnlyDatabase(Database):
     """Database that opens SQLite read-only and skips schema creation."""
@@ -137,7 +149,7 @@ class ReadOnlyDatabase(Database):
                 FROM screen_text_fts
                 JOIN screenshots s ON s.id = screen_text_fts.rowid
                 WHERE screen_text_fts MATCH ? AND s.timestamp >= ? AND s.timestamp < ?
-                ORDER BY bm25(screen_text_fts)
+                ORDER BY bm25(screen_text_fts), s.id DESC
                 LIMIT ?
             """, (HL_START, HL_END, match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
         return [dict(r) for r in rows if not is_private(r["app_name"], r["window_title"] or "")][:limit]
@@ -154,7 +166,7 @@ class ReadOnlyDatabase(Database):
                     " OR lower(coalesce(cwd, '')) LIKE ? ESCAPE '\\')")
             params += [like, like]
         with self._conn() as conn:
-            rows = conn.execute(sql + " ORDER BY ended_at DESC LIMIT ?", (*params, limit)).fetchall()
+            rows = conn.execute(sql + " ORDER BY ended_at DESC, session_id LIMIT ?", (*params, limit)).fetchall()
         return [dict(r) for r in rows]
 
     def get_agent_prompts(self, session_id: str, limit: int) -> list[dict]:
@@ -178,7 +190,7 @@ class ReadOnlyDatabase(Database):
                 JOIN agent_messages m ON m.id = agent_messages_fts.rowid
                 JOIN agent_sessions s ON s.session_id = m.session_id
                 WHERE agent_messages_fts MATCH ? AND m.timestamp >= ? AND m.timestamp < ?
-                ORDER BY bm25(agent_messages_fts)
+                ORDER BY bm25(agent_messages_fts), m.id DESC
                 LIMIT ?
             """, (HL_START, HL_END, match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
         return [dict(r) for r in rows if not session_is_private(r)][:limit]

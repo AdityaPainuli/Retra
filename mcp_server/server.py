@@ -24,7 +24,7 @@ from mcp.types import ToolAnnotations
 from config.settings import get_settings
 from mcp_server.store import (
     active_hours, app_breakdown, category_breakdown, compact_url, filter_project,
-    get_db, label, load_spans, minutes, parse_day, parse_when, project_breakdown,
+    MAX_RESULTS, get_db, label, load_spans, minutes, page, parse_day, parse_when, project_breakdown,
     redact_highlighted, redact_text, session_is_private, short, title_breakdown, url_breakdown,
 )
 from mcp_server.status import freshness, status as retra_status
@@ -49,7 +49,9 @@ mcp = MCPServer(
         "notes.\n\n"
         "How to use it: start broad (recent_work, coding_sessions), then search, then "
         "fetch detail (day_summary, wiki_page). Cite the dates and times from results "
-        "instead of saying 'recently'. An empty result means no match in that range: "
+        "instead of saying 'recently'. List results carry has_more and next_offset: "
+        "when has_more is true, call again with offset=next_offset before concluding. "
+        "An empty result means no match in that range: "
         "widen since/until or try another tool before saying it didn't happen. Data "
         "is only as fresh as the last capture: every result has a 'freshness' stamp "
         "(when each source was last captured or compiled); pass on its warnings and "
@@ -232,11 +234,12 @@ def day_summary(day: str = "today") -> dict:
 
 @tool("activity")
 def search_activity(query: str, since: Optional[str] = None, until: Optional[str] = None,
-                    limit: int = 20) -> dict:
+                    limit: int = 20, offset: int = 0) -> dict:
     """Find when something was worked on: case-insensitive match over window
     titles, URLs and page titles. `since`/`until` take YYYY-MM-DD, ISO
     datetimes, 'today', 'yesterday' or 'Nd' (N days ago); default is the
-    last 30 days. Returns hits grouped by day and window, newest first."""
+    last 30 days. Returns hits grouped by day and window, newest first.
+    When `has_more` is true, call again with offset=`next_offset`."""
     q = query.strip()
     if not q:
         return {"error": "query is empty"}
@@ -265,18 +268,20 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
         g["last"] = s.ts
         g["seconds"] += s.seconds
 
-    hits = sorted(groups.values(), key=lambda g: g["last"], reverse=True)[:limit]
+    ranked = sorted(groups.values(), key=lambda g: (g["last"], g["app"], g["title"]), reverse=True)
+    hits, paging = page(ranked, offset, limit)
     for g in hits:
         g["first"] = g["first"].strftime("%H:%M")
         g["last"] = g["last"].strftime("%H:%M")
         g["minutes"] = minutes(g.pop("seconds"))
 
     escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    # Matching pages are a fixed top 10, sent with the first page only.
     pages = [
         {"domain": p["domain"], "title": short(p["page_title"]), "url": compact_url(p["url"]),
          "minutes": minutes(p["seconds"] or 0), "last_seen": p["last_seen"][:16].replace("T", " ")}
-        for p in get_db().search_url_events(f"%{escaped}%", start, end, limit)
-    ][:10]
+        for p in get_db().search_url_events(f"%{escaped}%", start, end, 10)
+    ] if paging["offset"] == 0 else []
 
     return {
         "query": q,
@@ -285,17 +290,19 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
         "days": [{"date": d, "minutes": minutes(s)} for d, s in sorted(by_day.items(), reverse=True)][:30],
         "hits": hits,
         "pages": pages,
+        **paging,
     }
 
 
 @tool("screen_text")
 def search_screen_text(query: str, since: Optional[str] = None, until: Optional[str] = None,
-                       limit: int = 15) -> dict:
+                       limit: int = 15, offset: int = 0) -> dict:
     """Search the text that was visible on screen (read on-device from
     screenshots of the active window, with secrets masked). Use for 'where did
     I see X' or to recover what a page/doc/error said. All words must appear;
     `since`/`until` work like search_activity (default last 30 days). Returns
-    matches best first with a snippet; [brackets] mark the matched words."""
+    matches best first with a snippet; [brackets] mark the matched words.
+    When `has_more` is true, call again with offset=`next_offset`."""
     words = re.findall(r"\w+", query)
     if not words:
         return {"error": "query is empty"}
@@ -308,7 +315,7 @@ def search_screen_text(query: str, since: Optional[str] = None, until: Optional[
     # Quote each word so FTS operators in the query are taken literally.
     match = " ".join(f'"{w}"' for w in words)
     try:
-        rows = get_db().search_screen_text(match, start, end, limit)
+        rows, paging = page(get_db().search_screen_text(match, start, end, MAX_RESULTS), offset, limit)
     except sqlite3.OperationalError:
         return {"error": "screen text isn't available yet (capture daemon hasn't run the upgrade)"}
 
@@ -324,6 +331,7 @@ def search_screen_text(query: str, since: Optional[str] = None, until: Optional[
             }
             for r in rows
         ],
+        **paging,
     }
 
 
@@ -339,25 +347,24 @@ def _relative(path: str, root: Optional[str]) -> str:
 
 
 @tool("coding_sessions")
-def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5) -> dict:
+def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5, offset: int = 0) -> dict:
     """Recent Claude Code sessions, newest first: title, project, folder,
     branch, when, how many prompts, the latest turn recap (where it stopped),
     the last few prompts, files edited and PRs opened. Use for 'where did I
     leave off on X'. `project` filters by case-insensitive substring of the
-    project name or folder; `days` max 60."""
+    project name or folder; `days` max 60. When `has_more` is true, call
+    again with offset=`next_offset`."""
     days = max(1, min(days, 60))
     limit = max(1, min(limit, 25))
     start, end = _session_range(None, None, days)
     try:
-        # Extra rows leave room for sessions hidden by privacy settings.
-        rows = get_db().get_agent_sessions(start, end, limit * 4, project)
+        rows = get_db().get_agent_sessions(start, end, MAX_RESULTS, project)
     except sqlite3.OperationalError:
         return {"error": "coding sessions aren't available yet (capture daemon hasn't run the upgrade)"}
+    rows, paging = page([r for r in rows if not session_is_private(r)], offset, limit)
 
     sessions = []
     for r in rows:
-        if session_is_private(r):
-            continue
         prompts = get_db().get_agent_prompts(r["session_id"], 5)
         sessions.append({
             "title": r["title"],
@@ -376,21 +383,20 @@ def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5
             "files_edited": [_relative(f, r["cwd"]) for f in json.loads(r["files"] or "[]")[:10]],
             "prs_opened": json.loads(r["prs"] or "[]"),
         })
-        if len(sessions) >= limit:
-            break
 
     return {"range": f"{start.date().isoformat()} to {date.today().isoformat()}",
-            "project_filter": project, "sessions": sessions}
+            "project_filter": project, "sessions": sessions, **paging}
 
 
 @tool("coding_sessions")
 def search_coding_sessions(query: str, since: Optional[str] = None, until: Optional[str] = None,
-                           limit: int = 15) -> dict:
+                           limit: int = 15, offset: int = 0) -> dict:
     """Search what was asked in Claude Code sessions (prompts) and how turns
     ended (recaps). All words must appear; `since`/`until` work like
     search_activity (default last 90 days). Best matches first; [brackets]
     mark the matched words. Use coding_sessions(project=...) for the full
-    picture of a session found here."""
+    picture of a session found here. When `has_more` is true, call again
+    with offset=`next_offset`."""
     words = re.findall(r"\w+", query)
     if not words:
         return {"error": "query is empty"}
@@ -398,7 +404,7 @@ def search_coding_sessions(query: str, since: Optional[str] = None, until: Optio
     start, end = _session_range(since, until, 90)
     match = " ".join(f'"{w}"' for w in words)
     try:
-        rows = get_db().search_agent_messages(match, start, end, limit)
+        rows, paging = page(get_db().search_agent_messages(match, start, end, MAX_RESULTS), offset, limit)
     except sqlite3.OperationalError:
         return {"error": "coding sessions aren't available yet (capture daemon hasn't run the upgrade)"}
 
@@ -417,6 +423,7 @@ def search_coding_sessions(query: str, since: Optional[str] = None, until: Optio
             }
             for r in rows
         ],
+        **paging,
     }
 
 
