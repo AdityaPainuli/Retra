@@ -92,3 +92,43 @@ def test_matching_pages_ranked_from_the_url_index(retra):
     _events("Pull request")
     pages = _search(retra, "retra pull")["pages"]
     assert [p["title"] for p in pages] == ["Retra pull request"]
+
+
+def test_underscores_split_into_separate_words(retra):
+    _events("Request for Retra pull")
+    r = _search(retra, "pull_request retra")
+    assert r["match"] == "words" and r["hits"]
+
+
+def test_falls_back_when_only_idle_rows_match_the_words(retra):
+    db = Database(os.environ["RETRA_DB_PATH"])
+    db.insert_event(WindowEvent(timestamp=T0 - timedelta(minutes=10), app_name="Code", window_title="erver idle",
+                                category="idle", is_idle=True))
+    _events("server.py - retra")
+    r = _search(retra, "erver")
+    assert r["match"] == "substring"
+    assert [h["title"] for h in r["hits"]] == ["server.py - retra"]
+
+
+def test_pages_report_their_own_match(retra):
+    db = Database(os.environ["RETRA_DB_PATH"])
+    db.insert_url_event(T0, "https://github.com/acme/retra/pull/42", "github.com", "Retra pull request",
+                        "Brave Browser", "development", 60)
+    _events("Pull request")
+    r = _search(retra, "retra pull")
+    assert r["match"] == "substring" and r["pages_match"] == "words"
+
+
+def test_daemon_check_repairs_an_index_with_stale_content(retra):
+    _events("Old title")
+    path = os.environ["RETRA_DB_PATH"]
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TRIGGER window_events_fts_au")  # a title change the index never saw
+    conn.execute("UPDATE window_events SET window_title = 'Renamed window' WHERE window_title = 'Old title'")
+    conn.commit()
+    conn.close()
+
+    db = Database(path)  # row counts still agree, so the cheap check passes
+    assert db.verify_fts() == ["window_events_fts"]
+    r = _search(retra, "renamed")
+    assert r["match"] == "words" and [h["title"] for h in r["hits"]] == ["Renamed window"]

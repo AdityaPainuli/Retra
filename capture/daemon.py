@@ -503,6 +503,12 @@ class CaptureDaemon:
         log.info(f"  Idle threshold: {self.settings.capture.idle_threshold}s")
         log.info(f"  Database: {DB_PATH}")
 
+        try:
+            if rebuilt := self.db.verify_fts():
+                log.warning("Rebuilt search indexes that disagreed with their tables: %s", ", ".join(rebuilt))
+        except sqlite3.Error:
+            log.exception("Search index check failed")
+
         self._run_maintenance()
 
         while self.running:

@@ -237,11 +237,13 @@ def day_summary(day: str = "today") -> dict:
     }
 
 
-def _matching_pages(db, fts_query: Optional[str], pattern: str, start: datetime, end: datetime) -> list[dict]:
+def _matching_pages(db, fts_query: Optional[str], pattern: str, start: datetime,
+                    end: datetime) -> tuple[list[dict], str]:
+    """Related browser pages and how they matched ('words' or 'substring')."""
     if fts_query and db.fts_ready("url_events_fts", "url_events"):
         if pages := db.search_url_events(pattern, start, end, 10, match=fts_query):
-            return pages
-    return db.search_url_events(pattern, start, end, 10)
+            return pages, "words"
+    return db.search_url_events(pattern, start, end, 10), "substring"
 
 
 @tool("activity")
@@ -250,7 +252,7 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
     """Find when something was worked on, over window titles, URLs and page
     titles. Every word must appear, in any order, as a word or the start of
     one; if nothing matches that way, falls back to a plain substring match
-    (`match` says which was used). `since`/`until` take YYYY-MM-DD, ISO
+    (`match` says which was used for hits, `pages_match` for pages). `since`/`until` take YYYY-MM-DD, ISO
     datetimes, 'today', 'yesterday' or 'Nd' (N days ago); default is the
     last 30 days. Returns hits grouped by day and window, best match first,
     newest first among equals. When `has_more` is true, call again with
@@ -265,19 +267,22 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
     start = parse_when(since, _start_of(date.today() - timedelta(days=29)))
 
     db = get_db()
-    words = re.findall(r"\w+", q)
-    # Each word as a prefix, quoted so FTS operators in the query are literal.
+    # Words as the index splits them (underscores separate words too), each
+    # a prefix, quoted so FTS operators in the query are literal.
+    words = re.findall(r"[^\W_]+", q)
     fts_query = " ".join(f'"{w}"*' for w in words) if words else None
     scores: dict[int, float] = {}
     if fts_query and db.fts_ready("window_events_fts", "window_events"):
         scores = db.search_window_events(fts_query, start, end)
-    if scores:
-        mode = "words"
-        spans = [s for s in load_spans(start, end) if not s.private and s.id in scores]
-    else:
-        mode, ql = "substring", q.lower()
+    all_spans = load_spans(start, end)
+    # Spans drop idle rows and private ones are skipped, so decide on the
+    # fallback from what's left, not from the raw index hits.
+    spans = [s for s in all_spans if not s.private and s.id in scores]
+    mode = "words"
+    if not spans:
+        mode, ql, scores = "substring", q.lower(), {}
         spans = [
-            s for s in load_spans(start, end)
+            s for s in all_spans
             if not s.private and (ql in s.title.lower() or ql in (s.url or "").lower())
         ]
 
@@ -307,11 +312,13 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
 
     escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     # Matching pages are a fixed top 10, sent with the first page only.
+    found, pages_mode = _matching_pages(db, fts_query, f"%{escaped}%", start, end) if paging["offset"] == 0 \
+        else ([], None)
     pages = [
         {"domain": p["domain"], "title": short(p["page_title"]), "url": compact_url(p["url"]),
          "minutes": minutes(p["seconds"] or 0), "last_seen": p["last_seen"][:16].replace("T", " ")}
-        for p in _matching_pages(db, fts_query, f"%{escaped}%", start, end)
-    ] if paging["offset"] == 0 else []
+        for p in found
+    ]
 
     return {
         "query": q,
@@ -321,6 +328,7 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
         "days": [{"date": d, "minutes": minutes(s)} for d, s in sorted(by_day.items(), reverse=True)][:30],
         "hits": hits,
         "pages": pages,
+        "pages_match": pages_mode,
         **paging,
     }
 

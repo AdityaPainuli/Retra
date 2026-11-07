@@ -39,8 +39,12 @@ def _fts_ddl(fts: str, table: str, cols: tuple[str, ...]) -> str:
     """
 
 
+FTS_INDEXES = (("screen_text_fts", "screenshots"), *((f, t) for f, t, _ in _ACTIVITY_FTS))
+
+
 def fts_in_sync(conn, fts: str, table: str) -> bool:
-    """Whether the index holds one entry per row of its table."""
+    """Whether the index holds one entry per row of its table. Cheap, so it
+    runs on every open; verify_fts() also compares the content."""
     indexed = conn.execute(f"SELECT COUNT(*) FROM {fts}_docsize").fetchone()[0]
     return indexed == conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
@@ -60,6 +64,21 @@ class Database:
             self._persistent_conn.execute("PRAGMA foreign_keys=ON")
             self._persistent_conn.execute("PRAGMA synchronous=NORMAL")
         return self._persistent_conn
+
+    def verify_fts(self) -> list[str]:
+        """Check each full-text index against its table's content, not just
+        its row count, and rebuild any that disagree. About a second on a
+        large database, so the daemon runs it once at start. Returns the
+        indexes it rebuilt."""
+        rebuilt = []
+        with self._conn() as conn:
+            for fts, _ in FTS_INDEXES:
+                try:
+                    conn.execute(f"INSERT INTO {fts}({fts}, rank) VALUES ('integrity-check', 1)")
+                except sqlite3.DatabaseError:
+                    conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+                    rebuilt.append(fts)
+        return rebuilt
 
     @contextmanager
     def _conn(self):
@@ -237,8 +256,7 @@ class Database:
             # An index that disagrees with its table (created after the rows,
             # or rows written by an older version without the triggers) is
             # rebuilt here; read-only readers fall back to a plain scan.
-            for fts, table in (("screen_text_fts", "screenshots"),
-                               *((f, t) for f, t, _ in _ACTIVITY_FTS)):
+            for fts, table in FTS_INDEXES:
                 if not fts_in_sync(conn, fts, table):
                     conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
 

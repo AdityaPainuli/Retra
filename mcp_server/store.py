@@ -141,8 +141,9 @@ class ReadOnlyDatabase(Database):
             cte = """WITH hits AS MATERIALIZED (
                          SELECT u.*, bm25(url_events_fts) AS score FROM url_events_fts
                          JOIN url_events u ON u.id = url_events_fts.rowid
-                         WHERE url_events_fts MATCH ?)"""
-            source, where, params, order = "hits", "", [match], "MIN(score), last_seen DESC"
+                         WHERE url_events_fts MATCH ? AND u.timestamp >= ? AND u.timestamp < ?)"""
+            source, where, order = "hits", "", "MIN(score), last_seen DESC"
+            params = [match, start.isoformat(), end.isoformat()]
         else:
             cte, source = "", "url_events"
             where = " AND (url LIKE ? ESCAPE '\\' OR page_title LIKE ? ESCAPE '\\')"
