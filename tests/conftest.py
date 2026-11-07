@@ -1,7 +1,7 @@
 import json
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,11 +49,9 @@ def retra(tmp_path, monkeypatch):
     }, [((now - timedelta(minutes=50)).isoformat(), "prompt", "write the contract test")])
 
     # Default settings, not the local config: fixed privacy rules, and a vault in tmp_path so
-    # day_summary and wiki_page never read the developer's real notes.
+    # wiki_page never reads the developer's real notes.
     vault = tmp_path / "vault"
     settings = Settings(obsidian=ObsidianConfig(vault_path=str(vault)))
-    settings.obsidian.output_dir.mkdir(parents=True)
-    (settings.obsidian.output_dir / f"{date.today().isoformat()}.md").write_text("Fixture note\n")
     wiki = vault / "retra-wiki"
     (wiki / "projects").mkdir(parents=True)
     (wiki / "projects" / "retra.md").write_text("# Retra\n")

@@ -355,7 +355,7 @@ async def create_summary(date_str: str):
 
     ai_text = generate_summary(summary)
     if ai_text:
-        summary.ai_summary = ai_text
+        summary.set_reflection(ai_text)
         db.save_daily_summary(summary)
         return {"summary": ai_text}
     else:
