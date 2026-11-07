@@ -25,12 +25,11 @@ from config.settings import get_settings
 from mcp_server.store import (
     active_hours, app_breakdown, category_breakdown, compact_url, filter_project,
     MAX_RESULTS, get_db, label, load_spans, minutes, page, parse_day, parse_when, project_breakdown,
-    redact_highlighted, redact_text, session_is_private, short, title_breakdown, url_breakdown,
+    redact_highlighted, redact_text, session_is_private, short, timeline, title_breakdown, url_breakdown,
 )
 from mcp_server.status import freshness, status as retra_status
 from mcp_server.usage import log_call
 
-MAX_NOTE_CHARS = 8000
 MAX_WIKI_CHARS = 12000
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 
@@ -193,20 +192,23 @@ def recent_work(days: int = 1, project: Optional[str] = None) -> dict:
     }
 
 
-@tool("activity", "journal", "ai_summary")
+@tool("activity", "ai_summary")
 def day_summary(day: str = "today") -> dict:
-    """Stats for one day (YYYY-MM-DD, 'today' or 'yesterday'): focus score,
-    category minutes, projects, top titles, the saved AI reflection if one
-    exists, and the Obsidian daily note if present."""
+    """One day (YYYY-MM-DD, 'today' or 'yesterday'): focus score, category
+    minutes, projects, top titles, a timeline of blocks of 5+ minutes, and the
+    saved AI reflection if one exists. Stats and timeline are computed live;
+    the reflection is a snapshot from when it was written."""
     d = parse_day(day)
     summary = get_db().compute_daily_summary(d)
     spans = load_spans(_start_of(d), _start_of(d + timedelta(days=1)))
 
-    note_path = get_settings().obsidian.output_dir / f"{d.isoformat()}.md"
-    note = None
-    if note_path.exists():
-        text = redact_text(note_path.read_text(errors="replace"))
-        note = text[:MAX_NOTE_CHARS] + ("\n…[truncated]" if len(text) > MAX_NOTE_CHARS else "")
+    written = summary.ai_summary_at
+    then = summary.ai_summary_stats if summary.ai_summary else None
+    reflection_note = None
+    if then and then != summary.headline_stats():
+        reflection_note = ("The reflection was written from the numbers in 'ai_summary_stats'"
+                           + (f" at {written:%Y-%m-%d %H:%M}" if written else "")
+                           + ", before later activity was recorded. Quote 'stats' for the whole day.")
 
     return {
         "date": d.isoformat(),
@@ -227,8 +229,11 @@ def day_summary(day: str = "today") -> dict:
         "projects": project_breakdown(spans, 12),
         "apps": app_breakdown(spans, 10),
         "titles": title_breakdown(spans, 12),
+        "timeline": timeline(spans),
         "ai_summary": redact_text(summary.ai_summary),
-        "obsidian_note": note,
+        "ai_summary_written_at": f"{written:%Y-%m-%d %H:%M}" if summary.ai_summary and written else None,
+        "ai_summary_stats": then,
+        "ai_summary_note": reflection_note,
     }
 
 

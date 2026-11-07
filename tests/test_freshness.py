@@ -33,7 +33,7 @@ def test_results_carry_freshness(retra):
     assert f == {"activity_until": (retra.now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")}
 
     f = _call(retra, "day_summary")["freshness"]
-    assert set(f) == {"activity_until", "journal_compiled_at", "ai_summary_compiled_at"}
+    assert set(f) == {"activity_until", "ai_summary_compiled_at"}
 
     f = _call(retra, "wiki_page", {"name": "retra"})["freshness"]
     assert f == {"wiki_compiled_at": (retra.now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")}
