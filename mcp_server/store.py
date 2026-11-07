@@ -416,6 +416,28 @@ def url_breakdown(spans: list[Span], limit: int = 10) -> list[dict]:
     return [{"url": u, "minutes": minutes(secs)} for u, secs in rows]
 
 
+def timeline(spans: list[Span], min_minutes: int = 5, limit: int = 40, merge_gap_sec: int = 120) -> list[dict]:
+    """The day in order: runs of the same app and window, merged across short
+    gaps. Only runs of at least `min_minutes` count; past `limit`, the longest
+    are kept."""
+    blocks: list[dict] = []
+    for s in spans:
+        key = (s.app, label(s), s.project)
+        end = s.ts + timedelta(seconds=s.seconds)
+        last = blocks[-1] if blocks else None
+        if last and last["key"] == key and (s.ts - last["end"]).total_seconds() <= merge_gap_sec:
+            last["end"], last["secs"] = end, last["secs"] + s.seconds
+        else:
+            blocks.append({"key": key, "start": s.ts, "end": end, "secs": s.seconds})
+    blocks = [b for b in blocks if b["secs"] >= min_minutes * 60]
+    if len(blocks) > limit:
+        keep = {id(b) for b in sorted(blocks, key=lambda b: b["secs"], reverse=True)[:limit]}
+        blocks = [b for b in blocks if id(b) in keep]
+    return [{"start": b["start"].strftime("%H:%M"), "end": b["end"].strftime("%H:%M"),
+             "app": b["key"][0], "title": b["key"][1], "project": b["key"][2],
+             "minutes": minutes(b["secs"])} for b in blocks]
+
+
 def active_hours(spans: list[Span]) -> list[dict]:
     by_day: dict[date, list[Span]] = defaultdict(list)
     for s in spans:

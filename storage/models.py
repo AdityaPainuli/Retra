@@ -81,6 +81,9 @@ class DailySummary:
     focus_score: int = 0
     sessions: list[Session] = field(default_factory=list)
     ai_summary: Optional[str] = None
+    # When ai_summary was written. A reflection written before the day ended
+    # quotes stats for part of the day.
+    ai_summary_at: Optional[datetime] = None
 
     @property
     def active_minutes(self) -> int:

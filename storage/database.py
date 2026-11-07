@@ -101,6 +101,7 @@ class Database:
                     longest_focus_streak_minutes INTEGER DEFAULT 0,
                     focus_score INTEGER DEFAULT 0,
                     ai_summary TEXT,
+                    ai_summary_at TEXT,
                     created_at TEXT DEFAULT (datetime('now'))
                 );
 
@@ -150,6 +151,15 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_events_project_hint "
                 "ON window_events(project_hint)"
             )
+
+            # When the AI reflection was written (local time). Older rows only
+            # have created_at (UTC), which a re-save also resets; it's the best
+            # guess available for them.
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(daily_summaries)")}
+            if "ai_summary_at" not in cols:
+                conn.execute("ALTER TABLE daily_summaries ADD COLUMN ai_summary_at TEXT")
+                conn.execute("UPDATE daily_summaries SET ai_summary_at = datetime(created_at, 'localtime') "
+                             "WHERE ai_summary IS NOT NULL AND ai_summary != ''")
 
             # Screen text: OCR'd (and redacted) text of each screenshot. NULL
             # means not processed yet; '' means processed, no text found. Kept
@@ -747,11 +757,15 @@ class Database:
         # Load saved AI summary if one exists
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT ai_summary FROM daily_summaries WHERE date = ?",
+                "SELECT * FROM daily_summaries WHERE date = ?",
                 (target_date.isoformat(),)
             ).fetchone()
             if row and row["ai_summary"]:
                 summary.ai_summary = row["ai_summary"]
+                # Read-only readers (the MCP server) skip migrations, so the
+                # column can be missing until the daemon next starts.
+                if "ai_summary_at" in row.keys() and row["ai_summary_at"]:
+                    summary.ai_summary_at = datetime.fromisoformat(row["ai_summary_at"])
 
         return summary
 
@@ -762,8 +776,8 @@ class Database:
                 (date, total_tracked_minutes, focus_minutes, communication_minutes,
                  browsing_minutes, entertainment_minutes, writing_minutes, learning_minutes,
                  other_minutes, idle_minutes, app_switches, longest_focus_streak_minutes,
-                 focus_score, ai_summary)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 focus_score, ai_summary, ai_summary_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 summary.date.isoformat(),
                 summary.total_tracked_minutes,
@@ -779,6 +793,7 @@ class Database:
                 summary.longest_focus_streak_minutes,
                 summary.focus_score,
                 summary.ai_summary,
+                summary.ai_summary_at.isoformat(sep=" ", timespec="seconds") if summary.ai_summary_at else None,
             ))
 
     def get_weekly_summaries(self, end_date: date, days: int = 7) -> list[DailySummary]:

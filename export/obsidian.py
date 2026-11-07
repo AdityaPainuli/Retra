@@ -77,7 +77,7 @@ def generate_daily_note(
         elif summary.total_tracked_minutes > 30:
             ai_text = generate_summary(summary)
             if ai_text:
-                summary.ai_summary = ai_text
+                summary.ai_summary, summary.ai_summary_at = ai_text, datetime.now()
             pipeline_status.record("ai_summary", ok=bool(ai_text))
 
     # Persist stats even when the AI call fails, so trends and rollups
