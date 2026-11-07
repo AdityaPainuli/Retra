@@ -1,6 +1,7 @@
 """The nightly wiki compile only spends an LLM call when the day's note
 changed, and only sends the pages that note mentions."""
 
+import fcntl
 import shutil
 from datetime import date
 
@@ -42,10 +43,12 @@ def compiler(tmp_path, monkeypatch):
     class C:
         note = settings.obsidian.output_dir / f"{DAY.isoformat()}.md"
 
-        def run(self, note=NOTE, reply="===FILE: projects/retra.md===\n# Retra\nupdated\n===END_FILE===\n", **kw):
-            self.note.write_text(note)
+        def run(self, note=NOTE, reply="===FILE: projects/retra.md===\n# Retra\nupdated\n===END_FILE===\n",
+                day=DAY, **kw):
+            path = settings.obsidian.output_dir / f"{day.isoformat()}.md"
+            path.write_text(note)
             replies.append(reply)
-            wiki_compiler.compile_daily_note(DAY, **kw)
+            wiki_compiler.compile_daily_note(day, **kw)
 
     c = C()
     c.wiki, c.prompts = wiki, prompts
@@ -100,3 +103,50 @@ def test_short_or_partial_names_do_not_match():
     assert not wiki_compiler._mentions("worked on retrace", "retra")
     assert wiki_compiler._mentions("chatty cortex sync", "chatty-cortex")
     assert not wiki_compiler._mentions("ai stuff", "ai")
+
+
+def test_malformed_reply_is_not_cached(compiler):
+    compiler.run(reply="===FILE: projects/retra.md===\n# Retra\ncut off before the end marker")
+    compiler.run()
+    assert len(compiler.prompts) == 2
+    assert "RETRA BODY" not in (compiler.wiki / "projects" / "retra.md").read_text()
+
+
+def test_hash_is_saved_while_the_wiki_lock_is_held(compiler, monkeypatch):
+    held = []
+    save = wiki_compiler._save_compile_entry
+
+    def checking_save(*a, **kw):
+        with wiki_history.WIKI_LOCK_PATH.open("w") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
+        save(*a, **kw)
+
+    monkeypatch.setattr(wiki_compiler, "_save_compile_entry", checking_save)
+    compiler.run()
+    assert held == [True]
+
+
+def test_failed_sunday_rollup_is_retried_without_redoing_the_ingest(compiler, monkeypatch):
+    sunday = date(2026, 11, 8)
+    results = [False, True]
+    calls = []
+    monkeypatch.setattr(wiki_compiler, "compile_week", lambda d: calls.append(d) or results.pop(0))
+
+    compiler.run(day=sunday)  # ingest ok, rollup fails
+    compiler.run(day=sunday)  # unchanged note: no ingest, rollup retried and ok
+    compiler.run(day=sunday)  # nothing left to do
+    assert len(compiler.prompts) == 1
+    assert calls == [sunday, sunday]
+
+
+def test_aliases_in_every_frontmatter_form():
+    names = wiki_compiler._page_names
+    assert "chatty-cortex" in names("projects/chatty-insights.md", "---\naliases: chatty-cortex\n---\n")
+    assert {"a", "b"} <= names("projects/x.md", "---\naliases: [a, b]\n---\n")
+    assert {"a", "b"} <= names("projects/x.md", "---\naliases:\n  - a\n  - b\ntags: [t]\n---\n")
+    assert "t" not in names("projects/x.md", "---\naliases:\n  - a\ntags: [t]\n---\n")
