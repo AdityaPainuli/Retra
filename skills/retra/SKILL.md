@@ -46,8 +46,8 @@ Focus stats, projects, top titles, a timeline of 5+ minute blocks, and the AI re
 - `day`: `YYYY-MM-DD`, `today` or `yesterday` (default `today`)
 
 ### search_activity
-When something was worked on, matched against window titles, URLs and page titles. Hits are grouped by day and window, newest first.
-- `query`: text to find (case-insensitive substring)
+When something was worked on, matched against window titles, URLs and page titles. Hits are grouped by day and window, best match first. `match` is `words` when every word matched (any order, prefixes count) or `substring` when it fell back to a plain substring match. `pages_match` says the same for the related `pages`.
+- `query`: words to find
 - `since`, `until`: `YYYY-MM-DD`, ISO datetime, `today`, `yesterday` or `Nd` (N days ago). Default is the last 30 days.
 - `limit` (default 20, max 50)
 - `offset` (default 0): where the page starts, from `next_offset`

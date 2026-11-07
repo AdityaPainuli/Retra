@@ -237,14 +237,26 @@ def day_summary(day: str = "today") -> dict:
     }
 
 
+def _matching_pages(db, fts_query: Optional[str], pattern: str, start: datetime,
+                    end: datetime) -> tuple[list[dict], str]:
+    """Related browser pages and how they matched ('words' or 'substring')."""
+    if fts_query and db.fts_ready("url_events_fts", "url_events"):
+        if pages := db.search_url_events(pattern, start, end, 10, match=fts_query):
+            return pages, "words"
+    return db.search_url_events(pattern, start, end, 10), "substring"
+
+
 @tool("activity")
 def search_activity(query: str, since: Optional[str] = None, until: Optional[str] = None,
                     limit: int = 20, offset: int = 0) -> dict:
-    """Find when something was worked on: case-insensitive match over window
-    titles, URLs and page titles. `since`/`until` take YYYY-MM-DD, ISO
+    """Find when something was worked on, over window titles, URLs and page
+    titles. Every word must appear, in any order, as a word or the start of
+    one; if nothing matches that way, falls back to a plain substring match
+    (`match` says which was used for hits, `pages_match` for pages). `since`/`until` take YYYY-MM-DD, ISO
     datetimes, 'today', 'yesterday' or 'Nd' (N days ago); default is the
-    last 30 days. Returns hits grouped by day and window, newest first.
-    When `has_more` is true, call again with offset=`next_offset`."""
+    last 30 days. Returns hits grouped by day and window, best match first,
+    newest first among equals. When `has_more` is true, call again with
+    offset=`next_offset`."""
     q = query.strip()
     if not q:
         return {"error": "query is empty"}
@@ -254,11 +266,25 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
         end += timedelta(days=1)  # bare date: include that whole day
     start = parse_when(since, _start_of(date.today() - timedelta(days=29)))
 
-    ql = q.lower()
-    spans = [
-        s for s in load_spans(start, end)
-        if not s.private and (ql in s.title.lower() or ql in (s.url or "").lower())
-    ]
+    db = get_db()
+    # Words as the index splits them (underscores separate words too), each
+    # a prefix, quoted so FTS operators in the query are literal.
+    words = re.findall(r"[^\W_]+", q)
+    fts_query = " ".join(f'"{w}"*' for w in words) if words else None
+    scores: dict[int, float] = {}
+    if fts_query and db.fts_ready("window_events_fts", "window_events"):
+        scores = db.search_window_events(fts_query, start, end)
+    all_spans = load_spans(start, end)
+    # Spans drop idle rows and private ones are skipped, so decide on the
+    # fallback from what's left, not from the raw index hits.
+    spans = [s for s in all_spans if not s.private and s.id in scores]
+    mode = "words"
+    if not spans:
+        mode, ql, scores = "substring", q.lower(), {}
+        spans = [
+            s for s in all_spans
+            if not s.private and (ql in s.title.lower() or ql in (s.url or "").lower())
+        ]
 
     groups: dict[tuple, dict] = {}
     by_day: dict[str, int] = defaultdict(int)
@@ -268,33 +294,41 @@ def search_activity(query: str, since: Optional[str] = None, until: Optional[str
         key = (day, s.app, label(s))
         g = groups.setdefault(key, {
             "date": day, "first": s.ts, "last": s.ts, "seconds": 0,
-            "app": s.app, "title": key[2], "project": s.project,
+            "app": s.app, "title": key[2], "project": s.project, "score": 0.0,
         })
         g["last"] = s.ts
         g["seconds"] += s.seconds
+        g["score"] = min(g["score"], scores.get(s.id, 0.0))
 
+    # bm25 is negative, lower is better; substring matches all score 0.
     ranked = sorted(groups.values(), key=lambda g: (g["last"], g["app"], g["title"]), reverse=True)
+    ranked.sort(key=lambda g: g["score"])
     hits, paging = page(ranked, offset, limit)
     for g in hits:
+        del g["score"]
         g["first"] = g["first"].strftime("%H:%M")
         g["last"] = g["last"].strftime("%H:%M")
         g["minutes"] = minutes(g.pop("seconds"))
 
     escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     # Matching pages are a fixed top 10, sent with the first page only.
+    found, pages_mode = _matching_pages(db, fts_query, f"%{escaped}%", start, end) if paging["offset"] == 0 \
+        else ([], None)
     pages = [
         {"domain": p["domain"], "title": short(p["page_title"]), "url": compact_url(p["url"]),
          "minutes": minutes(p["seconds"] or 0), "last_seen": p["last_seen"][:16].replace("T", " ")}
-        for p in get_db().search_url_events(f"%{escaped}%", start, end, 10)
-    ] if paging["offset"] == 0 else []
+        for p in found
+    ]
 
     return {
         "query": q,
+        "match": mode,
         "range": f"{start.date().isoformat()} to {end.date().isoformat()}",
         "total_minutes": minutes(sum(by_day.values())),
         "days": [{"date": d, "minutes": minutes(s)} for d, s in sorted(by_day.items(), reverse=True)][:30],
         "hits": hits,
         "pages": pages,
+        "pages_match": pages_mode,
         **paging,
     }
 
