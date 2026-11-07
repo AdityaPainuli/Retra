@@ -164,6 +164,7 @@ python main.py start
 | `python main.py journal YYYY-MM-DD` | Generate journal for a specific date                    |
 | `python main.py compile`            | Compile today's daily note into wiki                    |
 | `python main.py compile YYYY-MM-DD` | Compile a specific date into wiki                       |
+| `python main.py compile [YYYY-MM-DD] --force` | Recompile even if the note hasn't changed |
 | `python main.py compile-week`       | Generate weekly rollup                                  |
 | `python main.py lint`               | Health check the wiki                                   |
 | `python main.py wiki-diff [date]`   | Show what the last compile (or that day's) changed      |
@@ -330,7 +331,7 @@ Obsidian Vault/
 **How it works:**
 
 1. `python main.py journal` exports the daily note, then auto-triggers wiki compilation
-2. The wiki compiler sends the daily note + schema + existing wiki pages to Claude
+2. The wiki compiler sends the daily note + schema + the wiki pages the note mentions (by slug or `aliases:`) to Claude; other pages are listed by name only and can't be rewritten. A day whose note hasn't changed since its last successful compile is skipped (`compile --force` to redo it). Prompt size per run is printed and kept in `data/wiki_compiles.json`
 3. Claude updates project pages, pattern tracking, learning logs, and people pages
 4. On Sundays, a weekly rollup is auto-generated
 5. `python main.py install` schedules the full pipeline (journal + compile) daily at 23:00
