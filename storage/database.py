@@ -102,6 +102,7 @@ class Database:
                     focus_score INTEGER DEFAULT 0,
                     ai_summary TEXT,
                     ai_summary_at TEXT,
+                    ai_summary_stats TEXT,
                     created_at TEXT DEFAULT (datetime('now'))
                 );
 
@@ -152,14 +153,21 @@ class Database:
                 "ON window_events(project_hint)"
             )
 
-            # When the AI reflection was written (local time). Older rows only
-            # have created_at (UTC), which a re-save also resets; it's the best
-            # guess available for them.
+            # When the AI reflection was written (local time) and the stats it
+            # was written from (JSON). Older rows only have created_at (UTC) and
+            # the saved stats columns, which a re-save also resets; they're the
+            # best guess available for them.
             cols = {row["name"] for row in conn.execute("PRAGMA table_info(daily_summaries)")}
             if "ai_summary_at" not in cols:
                 conn.execute("ALTER TABLE daily_summaries ADD COLUMN ai_summary_at TEXT")
                 conn.execute("UPDATE daily_summaries SET ai_summary_at = datetime(created_at, 'localtime') "
                              "WHERE ai_summary IS NOT NULL AND ai_summary != ''")
+            if "ai_summary_stats" not in cols:
+                conn.execute("ALTER TABLE daily_summaries ADD COLUMN ai_summary_stats TEXT")
+                conn.execute("""UPDATE daily_summaries SET ai_summary_stats = json_object(
+                    'focus_score', focus_score, 'tracked_minutes', total_tracked_minutes,
+                    'focus_minutes', focus_minutes, 'longest_focus_streak_minutes', longest_focus_streak_minutes,
+                    'app_switches', app_switches) WHERE ai_summary IS NOT NULL AND ai_summary != ''""")
 
             # Screen text: OCR'd (and redacted) text of each screenshot. NULL
             # means not processed yet; '' means processed, no text found. Kept
@@ -766,6 +774,8 @@ class Database:
                 # column can be missing until the daemon next starts.
                 if "ai_summary_at" in row.keys() and row["ai_summary_at"]:
                     summary.ai_summary_at = datetime.fromisoformat(row["ai_summary_at"])
+                if "ai_summary_stats" in row.keys() and row["ai_summary_stats"]:
+                    summary.ai_summary_stats = json.loads(row["ai_summary_stats"])
 
         return summary
 
@@ -776,8 +786,8 @@ class Database:
                 (date, total_tracked_minutes, focus_minutes, communication_minutes,
                  browsing_minutes, entertainment_minutes, writing_minutes, learning_minutes,
                  other_minutes, idle_minutes, app_switches, longest_focus_streak_minutes,
-                 focus_score, ai_summary, ai_summary_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 focus_score, ai_summary, ai_summary_at, ai_summary_stats)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 summary.date.isoformat(),
                 summary.total_tracked_minutes,
@@ -794,6 +804,7 @@ class Database:
                 summary.focus_score,
                 summary.ai_summary,
                 summary.ai_summary_at.isoformat(sep=" ", timespec="seconds") if summary.ai_summary_at else None,
+                json.dumps(summary.ai_summary_stats) if summary.ai_summary_stats else None,
             ))
 
     def get_weekly_summaries(self, end_date: date, days: int = 7) -> list[DailySummary]:

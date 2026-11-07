@@ -201,10 +201,12 @@ def day_summary(day: str = "today") -> dict:
     spans = load_spans(_start_of(d), _start_of(d + timedelta(days=1)))
 
     written = summary.ai_summary_at
+    then = summary.ai_summary_stats if summary.ai_summary else None
     reflection_note = None
-    if summary.ai_summary and written and spans and spans[-1].ts > written:
-        reflection_note = (f"The reflection was written {written:%Y-%m-%d %H:%M}, before the day's last "
-                           "activity: its numbers cover the day until then. 'stats' covers the whole day.")
+    if then and then != summary.headline_stats():
+        reflection_note = ("The reflection was written from the numbers in 'ai_summary_stats'"
+                           + (f" at {written:%Y-%m-%d %H:%M}" if written else "")
+                           + ", before later activity was recorded. Quote 'stats' for the whole day.")
 
     return {
         "date": d.isoformat(),
@@ -228,6 +230,7 @@ def day_summary(day: str = "today") -> dict:
         "timeline": timeline(spans),
         "ai_summary": redact_text(summary.ai_summary),
         "ai_summary_written_at": f"{written:%Y-%m-%d %H:%M}" if summary.ai_summary and written else None,
+        "ai_summary_stats": then,
         "ai_summary_note": reflection_note,
     }
 

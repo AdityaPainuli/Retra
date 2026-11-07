@@ -81,9 +81,24 @@ class DailySummary:
     focus_score: int = 0
     sessions: list[Session] = field(default_factory=list)
     ai_summary: Optional[str] = None
-    # When ai_summary was written. A reflection written before the day ended
-    # quotes stats for part of the day.
+    # When ai_summary was written and the stats it was written from. A
+    # reflection written before the day ended quotes stats for part of it.
     ai_summary_at: Optional[datetime] = None
+    ai_summary_stats: Optional[dict] = None
+
+    def headline_stats(self) -> dict:
+        """The numbers a reflection quotes."""
+        return {
+            "focus_score": self.focus_score,
+            "tracked_minutes": self.total_tracked_minutes,
+            "focus_minutes": self.focus_minutes,
+            "longest_focus_streak_minutes": self.longest_focus_streak_minutes,
+            "app_switches": self.app_switches,
+        }
+
+    def set_reflection(self, text: str):
+        """Attach a newly written reflection with the stats it was written from."""
+        self.ai_summary, self.ai_summary_at, self.ai_summary_stats = text, datetime.now(), self.headline_stats()
 
     @property
     def active_minutes(self) -> int:

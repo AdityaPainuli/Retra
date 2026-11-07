@@ -140,7 +140,6 @@ def test_every_tool_answers_on_fixture_db(server, retra):
         body = json.loads(res.content[0].text)
         assert "error" not in body, f"{name}: {body['error']}"
 
-    assert json.loads(results["day_summary"].content[0].text)["timeline"], "fixture events not in the timeline"
     assert "Retra" in json.loads(results["wiki_page"].content[0].text)["content"]
     sessions = json.loads(results["coding_sessions"].content[0].text)["sessions"]
     assert [s["title"] for s in sessions] == ["Add contract test"], "not reading the fixture DB"

@@ -41,7 +41,7 @@ Time per project and category, top windows and URLs, and active hours.
 - `project`: limit to one project
 
 ### day_summary
-Focus stats, projects, top titles, a timeline of 5+ minute blocks, and the AI reflection for one day. Stats and timeline are live. The reflection is a snapshot from `ai_summary_written_at`: when `ai_summary_note` is set, it was written before the day ended, so quote numbers from `stats`, not from the reflection.
+Focus stats, projects, top titles, a timeline of 5+ minute blocks, and the AI reflection for one day. Stats and timeline are live. The reflection is a snapshot: `ai_summary_written_at` says when, `ai_summary_stats` holds the numbers it was written from. When `ai_summary_note` is set those differ from the live `stats`, so quote `stats`, not the reflection's numbers.
 - `day`: `YYYY-MM-DD`, `today` or `yesterday` (default `today`)
 
 ### search_activity
