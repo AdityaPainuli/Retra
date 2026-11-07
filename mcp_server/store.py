@@ -108,23 +108,58 @@ class ReadOnlyDatabase(Database):
             is_idle=bool(r["is_idle"]),
         )
 
-    def search_url_events(self, pattern: str, start: datetime, end: datetime,
-                          limit: int) -> list[dict]:
-        """Matching pages grouped by domain + title, with private rows dropped
-        before they are merged (grouping also by app so blocked apps can be
-        filtered per row)."""
+    def fts_ready(self, fts: str, table: str) -> bool:
+        """Whether a full-text index exists and matches its table. The daemon
+        builds and repairs indexes; this reader only checks."""
+        from storage.database import fts_in_sync
+        try:
+            with self._conn() as conn:
+                return fts_in_sync(conn, fts, table)
+        except sqlite3.Error:
+            return False
+
+    def search_window_events(self, match: str, start: datetime, end: datetime) -> dict[int, float]:
+        """Event ids whose window title or URL match, with their bm25 score
+        (lower is better)."""
         with self._conn() as conn:
             rows = conn.execute("""
+                SELECT e.id, bm25(window_events_fts) AS score
+                FROM window_events_fts
+                JOIN window_events e ON e.id = window_events_fts.rowid
+                WHERE window_events_fts MATCH ? AND e.timestamp >= ? AND e.timestamp < ?
+            """, (match, start.isoformat(), end.isoformat())).fetchall()
+        return {r["id"]: r["score"] for r in rows}
+
+    def search_url_events(self, pattern: str, start: datetime, end: datetime,
+                          limit: int, match: Optional[str] = None) -> list[dict]:
+        """Matching pages grouped by domain + title, with private rows dropped
+        before they are merged (grouping also by app so blocked apps can be
+        filtered per row). With `match`, uses the full-text index and ranks
+        by bm25; otherwise a LIKE `pattern`, newest first."""
+        if match:
+            # MATERIALIZED: bm25() can't run once SQLite folds this into the GROUP BY.
+            cte = """WITH hits AS MATERIALIZED (
+                         SELECT u.*, bm25(url_events_fts) AS score FROM url_events_fts
+                         JOIN url_events u ON u.id = url_events_fts.rowid
+                         WHERE url_events_fts MATCH ? AND u.timestamp >= ? AND u.timestamp < ?)"""
+            source, where, order = "hits", "", "MIN(score), last_seen DESC"
+            params = [match, start.isoformat(), end.isoformat()]
+        else:
+            cte, source = "", "url_events"
+            where = " AND (url LIKE ? ESCAPE '\\' OR page_title LIKE ? ESCAPE '\\')"
+            params, order = [], "last_seen DESC"
+        with self._conn() as conn:
+            rows = conn.execute(f"""{cte}
                 SELECT domain, page_title, app_name, MAX(url) AS url,
                        SUM(duration_seconds) AS seconds,
                        MAX(timestamp) AS last_seen
-                FROM url_events
-                WHERE timestamp >= ? AND timestamp < ?
-                  AND (url LIKE ? ESCAPE '\\' OR page_title LIKE ? ESCAPE '\\')
+                FROM {source}
+                WHERE timestamp >= ? AND timestamp < ?{where}
                 GROUP BY domain, page_title, app_name
-                ORDER BY last_seen DESC
+                ORDER BY {order}
                 LIMIT ?
-            """, (start.isoformat(), end.isoformat(), pattern, pattern, limit * 5)).fetchall()
+            """, (*params, start.isoformat(), end.isoformat(),
+                  *([] if match else [pattern, pattern]), limit * 5)).fetchall()
 
         merged: dict[tuple, dict] = {}
         for r in rows:
@@ -136,7 +171,8 @@ class ReadOnlyDatabase(Database):
             })
             m["seconds"] += r["seconds"] or 0
             m["last_seen"] = max(m["last_seen"], r["last_seen"])
-        return sorted(merged.values(), key=lambda m: m["last_seen"], reverse=True)[:limit]
+        # Dict order follows the query's ranking.
+        return list(merged.values())[:limit]
 
     def search_screen_text(self, match: str, start: datetime, end: datetime,
                            limit: int) -> list[dict]:
@@ -336,6 +372,7 @@ class Span:
     category: str
     project: Optional[str]
     private: bool
+    id: Optional[int] = None
 
 
 def build_spans(events: list[WindowEvent], end_cap: Optional[datetime] = None) -> list[Span]:
@@ -366,6 +403,7 @@ def build_spans(events: list[WindowEvent], end_cap: Optional[datetime] = None) -
             category=e.category,
             project=None if private else attribution.get(e.id),
             private=private,
+            id=e.id,
         ))
     return spans
 

@@ -13,6 +13,42 @@ from contextlib import contextmanager
 from storage.models import WindowEvent, Session, Screenshot, DailySummary
 
 
+# (fts table, content table, indexed columns)
+_ACTIVITY_FTS = (
+    ("window_events_fts", "window_events", ("window_title", "url")),
+    ("url_events_fts", "url_events", ("page_title", "url")),
+)
+
+
+def _fts_ddl(fts: str, table: str, cols: tuple[str, ...]) -> str:
+    names = ", ".join(cols)
+    new = ", ".join(f"new.{c}" for c in cols)
+    old = ", ".join(f"old.{c}" for c in cols)
+    return f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5({names}, content='{table}', content_rowid='id');
+        CREATE TRIGGER IF NOT EXISTS {table}_fts_ai AFTER INSERT ON {table} BEGIN
+            INSERT INTO {fts}(rowid, {names}) VALUES (new.id, {new});
+        END;
+        CREATE TRIGGER IF NOT EXISTS {table}_fts_ad AFTER DELETE ON {table} BEGIN
+            INSERT INTO {fts}({fts}, rowid, {names}) VALUES ('delete', old.id, {old});
+        END;
+        CREATE TRIGGER IF NOT EXISTS {table}_fts_au AFTER UPDATE OF {names} ON {table} BEGIN
+            INSERT INTO {fts}({fts}, rowid, {names}) VALUES ('delete', old.id, {old});
+            INSERT INTO {fts}(rowid, {names}) VALUES (new.id, {new});
+        END;
+    """
+
+
+FTS_INDEXES = (("screen_text_fts", "screenshots"), *((f, t) for f, t, _ in _ACTIVITY_FTS))
+
+
+def fts_in_sync(conn, fts: str, table: str) -> bool:
+    """Whether the index holds one entry per row of its table. Cheap, so it
+    runs on every open; verify_fts() also compares the content."""
+    indexed = conn.execute(f"SELECT COUNT(*) FROM {fts}_docsize").fetchone()[0]
+    return indexed == conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
 class Database:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
@@ -28,6 +64,21 @@ class Database:
             self._persistent_conn.execute("PRAGMA foreign_keys=ON")
             self._persistent_conn.execute("PRAGMA synchronous=NORMAL")
         return self._persistent_conn
+
+    def verify_fts(self) -> list[str]:
+        """Check each full-text index against its table's content, not just
+        its row count, and rebuild any that disagree. About a second on a
+        large database, so the daemon runs it once at start. Returns the
+        indexes it rebuilt."""
+        rebuilt = []
+        with self._conn() as conn:
+            for fts, _ in FTS_INDEXES:
+                try:
+                    conn.execute(f"INSERT INTO {fts}({fts}, rank) VALUES ('integrity-check', 1)")
+                except sqlite3.DatabaseError:
+                    conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+                    rebuilt.append(fts)
+        return rebuilt
 
     @contextmanager
     def _conn(self):
@@ -196,8 +247,18 @@ class Database:
                     VALUES (new.id, new.ocr_text, new.app_name, new.window_title);
                 END;
             """)
-            if conn.execute("SELECT COUNT(*) FROM screen_text_fts_docsize").fetchone()[0] == 0:
-                conn.execute("INSERT INTO screen_text_fts(screen_text_fts) VALUES ('rebuild')")
+
+            # Full-text search over window titles and URLs, and over browser
+            # page titles and URLs, fed by triggers like screen_text_fts.
+            for fts, table, cols in _ACTIVITY_FTS:
+                conn.executescript(_fts_ddl(fts, table, cols))
+
+            # An index that disagrees with its table (created after the rows,
+            # or rows written by an older version without the triggers) is
+            # rebuilt here; read-only readers fall back to a plain scan.
+            for fts, table in FTS_INDEXES:
+                if not fts_in_sync(conn, fts, table):
+                    conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
 
             # Coding agent sessions (Claude Code logs). One row per session,
             # plus its prompts and turn recaps as searchable messages.
