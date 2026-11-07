@@ -74,3 +74,30 @@ def test_backgrounded_create_read_later(tmp_path):
         _assistant(("t4", "Bash", {"command": "gh pr list"})),
         _result("t4", URL.format(31)),
     ) == [URL.format(30)]
+
+
+def test_quoted_and_commented_mentions_are_ignored(tmp_path):
+    for cmd in ("printf '%s\\n' '$(gh pr create)' 'https://github.com/acme/app/pull/42'",
+                'echo "a; gh pr create" && echo https://github.com/acme/app/pull/42',
+                "echo https://github.com/acme/app/pull/42  # then gh pr create",
+                "cat <<EOF\nx; gh pr create\nEOF\necho https://github.com/acme/app/pull/42"):
+        assert _prs(tmp_path, _assistant(("t1", "Bash", {"command": cmd})), _result("t1", URL.format(42))) == [], cmd
+
+
+def test_create_in_subshell_or_substitution_counts(tmp_path):
+    for cmd in ('echo "made $(gh pr create --fill)"', "(cd app && gh pr create --fill)"):
+        assert _prs(tmp_path, _assistant(("t1", "Bash", {"command": cmd})), _result("t1", URL.format(43))) \
+            == [URL.format(43)], cmd
+
+
+def test_background_output_only_mentioned_is_ignored(tmp_path):
+    out_file = "/private/tmp/claude-501/x/tasks/b2.output"
+    moved = f"Output is being written to: {out_file}. You will be notified."
+    assert _prs(tmp_path,
+        _assistant(("t1", "Bash", {"command": "gh pr create --fill"})),
+        _result("t1", moved),
+        _assistant(("t2", "Bash", {"command": f"gh pr list --json url --jq '.[].url' # {out_file}"})),
+        _result("t2", URL.format(44)),
+        _assistant(("t3", "Bash", {"command": f"tail -5 {out_file}"})),
+        _result("t3", URL.format(45)),
+    ) == [URL.format(45)]

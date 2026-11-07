@@ -35,9 +35,11 @@ _SCRATCH_DIRS = ("/tmp/", "/private/tmp/", "/private/var/folders/", "/var/folder
 _PR_LINE_RE = re.compile(
     r"^(?:\s*\d+\t)?(?:[\w .-]{1,30}:\s*)?(https://github\.com/[\w.-]+/[\w.-]+/pull/\d+)\s*$", re.M)
 # The command must run `gh pr create` (at the start of a line or after ;, &&,
-# || or a pipe), not just mention it: a script that edits this parser has the
-# phrase inside a string.
+# ||, a pipe or a subshell), not just mention it: a script that edits this
+# parser has the phrase inside a string. Matched against _shell_code().
 _PR_CREATE_RE = re.compile(r"(?:^|[;&|(])\s*gh\s+pr\s+create\b", re.M)
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+_READ_CMD = r"(?:^|[;&|(])\s*(?:cat|tail|head|less|more)\b[^;&|#\n]*"
 # A long command is moved to the background; its output lands in a file that
 # is read later, so the PR URL shows up in that later read.
 _BACKGROUND_RE = re.compile(r"Output is being written to: (\S+?\.output)")
@@ -75,8 +77,81 @@ def _repo_dir(cwd: str) -> str:
     return re.split(r"/\.claude/worktrees/", cwd, maxsplit=1)[0]
 
 
+def _shell_code(command: str) -> str:
+    """The command with literal text blanked out, so only what the shell runs
+    is left: single-quoted strings, comments, heredoc bodies, and double-quoted
+    text outside $(...). Unquoted heredoc bodies are blanked too; a command
+    substitution inside one is rare enough to miss."""
+    out, i, n = [], 0, len(command)
+    in_dq = False
+    stack = []  # for each open paren: whether it was opened inside double quotes
+    heredocs = []  # delimiters whose bodies start after the current line
+    while i < n:
+        c = command[i]
+        if in_dq:
+            if c == "\\":
+                i += 2
+            elif c == '"':
+                in_dq = False
+                i += 1
+            elif command.startswith("$(", i):
+                stack.append(True)
+                in_dq = False
+                out.append("(")
+                i += 2
+            else:
+                i += 1
+            continue
+        if c == "\n" and heredocs:
+            out.append(c)
+            i += 1
+            for delim in heredocs:
+                while i < n:
+                    end = command.find("\n", i)
+                    end = n if end < 0 else end
+                    line, i = command[i:end], end + 1
+                    if line.strip() == delim:
+                        break
+            heredocs = []
+            continue
+        if c == "\\":
+            out.append(command[i:i + 2])
+            i += 2
+        elif c == "'":
+            end = command.find("'", i + 1)
+            i = n if end < 0 else end + 1
+            out.append(" ")
+        elif c == '"':
+            in_dq = True
+            out.append(" ")
+            i += 1
+        elif c == "#" and (i == 0 or command[i - 1] in " \t\n;&|("):
+            end = command.find("\n", i)
+            i = n if end < 0 else end
+        elif (m := _HEREDOC_RE.match(command, i)) and not command.startswith("<<<", i):
+            heredocs.append(m.group(2))
+            out.append(" ")
+            i = m.end()
+        elif c == "(":
+            stack.append(False)
+            out.append(c)
+            i += 1
+        elif c == ")":
+            in_dq = stack.pop() if stack else False
+            out.append(c)
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def _runs_pr_create(command: str) -> bool:
-    return bool(_PR_CREATE_RE.search(command))
+    return bool(_PR_CREATE_RE.search(_shell_code(command)))
+
+
+def _reads_file(command: str, path: str) -> bool:
+    return bool(re.search(_READ_CMD + re.escape(path), command, re.M))
 
 
 def _result_text(content) -> str:
@@ -153,7 +228,7 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
                     elif name == "Bash" and _runs_pr_create(str(args.get("command", ""))):
                         pr_creates.add(block.get("id"))
                     elif pr_outputs and (
-                        (name == "Bash" and any(p in str(args.get("command", "")) for p in pr_outputs))
+                        (name == "Bash" and any(_reads_file(str(args.get("command", "")), p) for p in pr_outputs))
                         or (name == "Read" and args.get("file_path") in pr_outputs)
                     ):
                         pr_creates.add(block.get("id"))
