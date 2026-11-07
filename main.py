@@ -15,6 +15,7 @@ Usage:
     python main.py catchup     Redo failed/missed journal, reflection and wiki runs (last 3 days)
     python main.py compile     Compile today's daily note into wiki
     python main.py compile YYYY-MM-DD  Compile a specific date into wiki
+    python main.py compile [YYYY-MM-DD] --force  Recompile even if the note hasn't changed
     python main.py compile-week   Generate weekly rollup
     python main.py lint        Health check the wiki
     python main.py wiki-diff [YYYY-MM-DD]  Show what the last compile (or that day's) changed in the wiki
@@ -194,15 +195,13 @@ def cmd_catchup():
     print("Catch-up complete" if done else "Catch-up incomplete, will retry")
 
 
-def cmd_compile(target_date: str = None):
+def cmd_compile(*args: str):
     from export.wiki_compiler import compile_daily_note
 
-    if target_date:
-        d = date.fromisoformat(target_date)
-    else:
-        d = date.today()
-
-    compile_daily_note(d)
+    force = "--force" in args
+    dates = [a for a in args if a != "--force"]
+    d = date.fromisoformat(dates[0]) if dates else date.today()
+    compile_daily_note(d, force=force)
 
 
 def cmd_compile_week():
@@ -466,7 +465,9 @@ def main():
         sys.exit(1)
 
     # Pass extra args to commands that accept them
-    if command in ("journal", "compile", "wiki-diff") and len(sys.argv) > 2:
+    if command == "compile":
+        cmd_compile(*sys.argv[2:])
+    elif command in ("journal", "wiki-diff") and len(sys.argv) > 2:
         COMMANDS[command](sys.argv[2])
     elif command == "ask":
         if len(sys.argv) < 3:
