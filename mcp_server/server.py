@@ -391,7 +391,8 @@ def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5
     branch, when, how many prompts, the latest turn recap (where it stopped),
     the last few prompts, files edited and PRs opened. Use for 'where did I
     leave off on X'. `project` filters by case-insensitive substring of the
-    project name or folder; `days` max 60. When `has_more` is true, call
+    project name, folder, or `repo` (the repo's code-host name when it
+    differs from the folder name); `days` max 60. When `has_more` is true, call
     again with offset=`next_offset`."""
     days = max(1, min(days, 60))
     limit = max(1, min(limit, 25))
@@ -408,6 +409,7 @@ def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5
         sessions.append({
             "title": r["title"],
             "project": r["project"],
+            "repo": r.get("repo"),
             "folder": r["cwd"],
             "branch": r["branch"],
             "started": (r["started_at"] or "")[:16].replace("T", " "),

@@ -376,6 +376,20 @@ def _cwd_to_project_slug(cwd: str) -> Optional[str]:
     except Exception:
         pass
 
+    # 1b. No repo: the nearest folder with agent instructions (CLAUDE.md,
+    #     AGENTS.md) is a project the user works on with an agent.
+    if not slug:
+        try:
+            home = Path.home()
+            for parent in [p, *p.parents]:
+                if parent == home or parent == parent.parent:
+                    break
+                if any((parent / m).is_file() for m in _AGENT_INSTRUCTION_FILES):
+                    slug = parent.name
+                    break
+        except Exception:
+            pass
+
     # 2. Fall back: any path segment that's a known dev parent dir → the
     #    NEXT segment is the project.
     if not slug:
@@ -403,6 +417,54 @@ def _cwd_to_project_slug(cwd: str) -> Optional[str]:
 
     _PROJECT_CACHE[cwd] = slug
     return slug
+
+
+_AGENT_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
+_REMOTE_URL_RE = re.compile(r'^\[remote "origin"\][^\[]*?^\s*url\s*=\s*(\S+)', re.M | re.S)
+
+
+def _remote_name(root: Path) -> Optional[str]:
+    """The repo's name on its code host (origin remote), or None."""
+    try:
+        config = (root / ".git" / "config").read_text(errors="replace")
+    except OSError:
+        return None  # no repo, or a worktree whose .git is a file
+    m = _REMOTE_URL_RE.search(config)
+    if not m:
+        return None
+    # git@github.com:owner/repo.git -> github.com/owner/repo.git
+    return _url_to_project(re.sub(r"^[\w.-]+@([\w.-]+):", r"\1/", m.group(1)))
+
+
+def repo_remote_name(cwd: str) -> Optional[str]:
+    """For a folder inside a git repo, the repo's name on its code host when
+    it differs from the folder's project name (a "daylens" folder holding the
+    "Retra" repo), else None. Projects are named after folders; activity also
+    names them from github.com URLs, so this is the other name to match."""
+    try:
+        p = Path(os.path.expanduser(cwd))
+        root = next((d for d in [p, *p.parents] if (d / ".git").exists()), None)
+    except Exception:
+        return None
+    name = _remote_name(root) if root else None
+    return name if name and name.lower() != root.name.lower() else None
+
+
+_ALIASES: Optional[dict[str, set[str]]] = None
+
+
+def project_aliases() -> dict[str, set[str]]:
+    """Lowercased project name -> other names for the same local repo (its
+    folder name and its code-host name), for repos in the usual dev folders.
+    Scanned once."""
+    global _ALIASES
+    if _ALIASES is None:
+        _ALIASES = {}
+        for child in _local_repos():
+            if other := repo_remote_name(str(child)):
+                _ALIASES.setdefault(child.name.lower(), set()).add(other)
+                _ALIASES.setdefault(other.lower(), set()).add(child.name)
+    return _ALIASES
 
 
 def _extract_cwd_from_title(title: str) -> Optional[str]:
@@ -436,9 +498,14 @@ _KNOWN_PROJECT_SLUGS: Optional[set[str]] = None
 
 def _known_project_slugs() -> set[str]:
     global _KNOWN_PROJECT_SLUGS
-    if _KNOWN_PROJECT_SLUGS is not None:
-        return _KNOWN_PROJECT_SLUGS
-    slugs: set[str] = set()
+    if _KNOWN_PROJECT_SLUGS is None:
+        _KNOWN_PROJECT_SLUGS = {child.name.lower() for child in _local_repos()}
+    return _KNOWN_PROJECT_SLUGS
+
+
+def _local_repos() -> list[Path]:
+    """Folders directly under the usual dev parents that look like a repo."""
+    found: list[Path] = []
     home = Path.home()
     parents = [home / d for d in ("Desktop", "code", "projects", "work",
                                   "Documents/work", "dev", "src")]
@@ -452,11 +519,10 @@ def _known_project_slugs() -> set[str]:
                 if not child.is_dir() or child.name.startswith("."):
                     continue
                 if any((child / m).exists() for m in repo_markers):
-                    slugs.add(child.name.lower())
+                    found.append(child)
         except (PermissionError, OSError):
             continue
-    _KNOWN_PROJECT_SLUGS = slugs
-    return slugs
+    return found
 
 
 # Looser editor pattern for single-word slugs: only accepted when the slug

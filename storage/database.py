@@ -302,6 +302,11 @@ class Database:
                     VALUES ('delete', old.id, old.text);
                 END;
             """)
+            # The repo's code-host name when it differs from the folder the
+            # project is named after (folder "daylens", repo "Retra").
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(agent_sessions)")}
+            if "repo" not in cols:
+                conn.execute("ALTER TABLE agent_sessions ADD COLUMN repo TEXT")
 
     # ── Window Events ─────────────────────────────────────────────
 
@@ -664,6 +669,16 @@ class Database:
         with self._conn() as conn:
             rows = conn.execute("SELECT log_path, log_size, log_mtime FROM agent_sessions").fetchall()
         return {r["log_path"]: (r["log_size"], r["log_mtime"]) for r in rows}
+
+    def get_agent_session_folders(self) -> list[tuple[str, Optional[str], Optional[str]]]:
+        """Distinct (cwd, project, repo) of stored sessions."""
+        with self._conn() as conn:
+            return [tuple(r) for r in conn.execute("SELECT DISTINCT cwd, project, repo FROM agent_sessions "
+                                                   "WHERE cwd IS NOT NULL")]
+
+    def set_agent_session_names(self, cwd: str, project: Optional[str], repo: Optional[str]):
+        with self._conn() as conn:
+            conn.execute("UPDATE agent_sessions SET project = ?, repo = ? WHERE cwd = ?", (project, repo, cwd))
 
     def save_agent_session(self, session: dict, messages: list[tuple[str, str, str]]):
         """Replace one session and its (timestamp, kind, text) messages.
