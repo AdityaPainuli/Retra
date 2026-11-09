@@ -190,17 +190,23 @@ class ReadOnlyDatabase(Database):
             """, (HL_START, HL_END, match, start.isoformat(), end.isoformat(), limit * 3)).fetchall()
         return [dict(r) for r in rows if not is_private(r["app_name"], r["window_title"] or "")][:limit]
 
+    def _has_column(self, table: str, column: str) -> bool:
+        """Whether the daemon has added a column yet (this reader skips migrations)."""
+        with self._conn() as conn:
+            return any(r["name"] == column for r in conn.execute(f"PRAGMA table_info({table})"))
+
     def get_agent_sessions(self, start: datetime, end: datetime, limit: int,
                            project: Optional[str] = None) -> list[dict]:
         """Coding agent sessions active in [start, end), most recent first.
-        `project` matches a case-insensitive substring of project or folder."""
+        `project` matches a case-insensitive substring of the project, the
+        folder, or the repo's code-host name (folder "daylens", repo "Retra")."""
         sql = "SELECT * FROM agent_sessions WHERE ended_at >= ? AND started_at < ?"
         params: list = [start.isoformat(), end.isoformat()]
         if project:
             like = "%" + project.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            sql += (" AND (lower(coalesce(project, '')) LIKE ? ESCAPE '\\'"
-                    " OR lower(coalesce(cwd, '')) LIKE ? ESCAPE '\\')")
-            params += [like, like]
+            fields = ["project", "cwd"] + (["repo"] if self._has_column("agent_sessions", "repo") else [])
+            sql += " AND (" + " OR ".join(f"lower(coalesce({f}, '')) LIKE ? ESCAPE '\\'" for f in fields) + ")"
+            params += [like] * len(fields)
         with self._conn() as conn:
             rows = conn.execute(sql + " ORDER BY ended_at DESC, session_id LIMIT ?", (*params, limit)).fetchall()
         return [dict(r) for r in rows]
@@ -416,8 +422,11 @@ def load_spans(start: datetime, end: datetime) -> list[Span]:
 def filter_project(spans: Iterable[Span], project: Optional[str]) -> list[Span]:
     if not project:
         return list(spans)
+    from capture.window_tracker import project_aliases
     p = project.lower()
-    return [s for s in spans if s.project and p in s.project.lower()]
+    # A repo can show up under its folder name and its code-host name.
+    names = {p} | {a.lower() for name, alts in project_aliases().items() if p in name for a in alts}
+    return [s for s in spans if s.project and any(n in s.project.lower() for n in names)]
 
 
 # ── Aggregations ─────────────────────────────────────────────────

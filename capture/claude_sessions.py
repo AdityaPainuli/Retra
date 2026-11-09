@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from capture.screen_text import redact
-from capture.window_tracker import _cwd_to_project_slug
+from capture.window_tracker import _cwd_to_project_slug, repo_remote_name
 
 log = logging.getLogger("retra")
 
@@ -245,6 +245,7 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
         "source": "claude-code",
         "cwd": repo,
         "project": _cwd_to_project_slug(repo) if repo else None,
+        "repo": repo_remote_name(repo) if repo else None,
         "branch": branch,
         "title": redact(title)[:100] if title else next(t for _, k, t in messages if k == "prompt")[:100],
         "started_at": _local(started),
@@ -302,4 +303,14 @@ def sync_sessions(db, logs_dir: Path, retention_days: int = 0,
         session.update(log_path=str(path), log_size=stat.st_size, log_mtime=stat.st_mtime)
         db.save_agent_session(session, messages)
         saved += 1
+    refresh_session_names(db)
     return saved
+
+
+def refresh_session_names(db):
+    """Re-derive project and repo for stored sessions whose naming rules
+    changed since they were saved (unchanged logs aren't re-parsed)."""
+    for cwd, project, repo in db.get_agent_session_folders():
+        names = (_cwd_to_project_slug(cwd), repo_remote_name(cwd))
+        if names != (project, repo):
+            db.set_agent_session_names(cwd, *names)

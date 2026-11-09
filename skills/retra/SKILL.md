@@ -61,7 +61,7 @@ Full-text search over text read from screenshots, best match first, with a snipp
 
 ### coding_sessions
 Recent Claude Code sessions, newest first: title, project, branch, the latest turn recap (where it stopped), recent prompts, files edited and PRs opened.
-- `project`: limit to one project or folder
+- `project`: limit to one project. Matches the project (named after its folder), the folder path, or `repo`, the repo's GitHub name when it differs (folder `daylens`, repo `Retra`).
 - `days` (default 7, max 60)
 - `limit` (default 5, max 25)
 - `offset` (default 0): where the page starts, from `next_offset`
