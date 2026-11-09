@@ -10,12 +10,14 @@ stored. Logs are only re-read when their size or mtime changes.
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
 from capture.screen_text import redact
+from capture import window_tracker
 from capture.window_tracker import _cwd_to_project_slug, repo_remote_name
 
 log = logging.getLogger("retra")
@@ -309,8 +311,12 @@ def sync_sessions(db, logs_dir: Path, retention_days: int = 0,
 
 def refresh_session_names(db):
     """Re-derive project and repo for stored sessions whose naming rules
-    changed since they were saved (unchanged logs aren't re-parsed)."""
+    changed since they were saved (unchanged logs aren't re-parsed). Folders
+    that no longer exist keep their saved names."""
     for cwd, project, repo in db.get_agent_session_folders():
+        if not cwd or not os.path.isdir(os.path.expanduser(cwd)):
+            continue
+        window_tracker._PROJECT_CACHE.pop(cwd, None)  # the folder may have gained CLAUDE.md
         names = (_cwd_to_project_slug(cwd), repo_remote_name(cwd))
         if names != (project, repo):
             db.set_agent_session_names(cwd, *names)

@@ -382,7 +382,7 @@ def _cwd_to_project_slug(cwd: str) -> Optional[str]:
         try:
             home = Path.home()
             for parent in [p, *p.parents]:
-                if parent == home or home not in parent.parents:
+                if parent == home or parent == parent.parent:
                     break
                 if any((parent / m).is_file() for m in _AGENT_INSTRUCTION_FILES):
                     slug = parent.name

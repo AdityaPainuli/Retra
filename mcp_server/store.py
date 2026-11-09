@@ -239,8 +239,9 @@ class ReadOnlyDatabase(Database):
 
 
 def session_is_private(session) -> bool:
-    """A session whose folder, project or title matches the blocklist."""
-    hay = " ".join(str(session[k] or "") for k in ("cwd", "project", "title"))
+    """A session whose folder, project, repo or title matches the blocklist."""
+    keys = set(session.keys())
+    hay = " ".join(str(session[k] or "") for k in ("cwd", "project", "repo", "title") if k in keys)
     return redact_text(hay) != hay
 
 
@@ -424,9 +425,10 @@ def filter_project(spans: Iterable[Span], project: Optional[str]) -> list[Span]:
         return list(spans)
     from capture.window_tracker import project_aliases
     p = project.lower()
-    # A repo can show up under its folder name and its code-host name.
-    names = {p} | {a.lower() for name, alts in project_aliases().items() if p in name for a in alts}
-    return [s for s in spans if s.project and any(n in s.project.lower() for n in names)]
+    # A repo can show up under its folder name and its code-host name. The
+    # query matches as a substring; resolved aliases only as whole names.
+    aliases = {a.lower() for name, alts in project_aliases().items() if p in name for a in alts}
+    return [s for s in spans if s.project and (p in s.project.lower() or s.project.lower() in aliases)]
 
 
 # ── Aggregations ─────────────────────────────────────────────────

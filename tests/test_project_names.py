@@ -81,3 +81,43 @@ def test_stored_sessions_get_renamed_and_found_by_repo_name(retra, repos):
     # The conftest fixture's own "retra" session matches too.
     assert ("daylens", "Retra") in [(s["project"], s["repo"]) for s in found]
     assert [s["project"] for s in asyncio.run(sessions("content-factory"))] == ["content-factory"]
+
+
+def test_marker_projects_outside_home_are_found(repos, tmp_path):
+    ext = tmp_path / "Volumes" / "ext" / "notes-vault"
+    (ext / "sub").mkdir(parents=True)
+    (ext / "AGENTS.md").write_text("x")
+    assert window_tracker._cwd_to_project_slug(str(ext / "sub")) == "notes-vault"
+
+
+def test_alias_matches_whole_names_only(repos, monkeypatch):
+    from mcp_server import store
+    spans = [store.Span(**{**dict.fromkeys(store.Span.__dataclass_fields__), "project": p})
+             for p in ("daylens", "daylens-docs", "Retra")]
+    got = [s.project for s in store.filter_project(spans, "retra")]
+    assert got == ["daylens", "Retra"]
+
+
+def test_blocked_repo_name_hides_the_session(monkeypatch):
+    from mcp_server import store
+    monkeypatch.setattr(store, "redact_text", lambda t: t.replace("SecretClient", "[private]"))
+    assert store.session_is_private({"cwd": "/x/daylens", "project": "daylens", "repo": "SecretClient", "title": "t"})
+    assert not store.session_is_private({"cwd": "/x/daylens", "project": "daylens", "title": "t"})
+
+
+def test_refresh_picks_up_new_markers_and_keeps_missing_folders(retra, repos, tmp_path):
+    db = Database(os.environ["RETRA_DB_PATH"])
+    at = retra.now - timedelta(hours=2)
+    late = tmp_path / "home" / "Desktop" / "late"
+    late.mkdir()
+    gone = str(tmp_path / "home" / "Desktop" / "gone")
+    db.save_agent_session(_session("l1", str(late), None, at), [])
+    db.save_agent_session(_session("g1", gone, "gone", at), [])
+    assert window_tracker._cwd_to_project_slug(str(late)) is None  # cached as unnamed
+
+    (late / "CLAUDE.md").write_text("x")
+    claude_sessions.refresh_session_names(db)
+
+    names = {cwd: (p, r) for cwd, p, r in db.get_agent_session_folders()}
+    assert names[str(late)] == ("late", None)
+    assert names[gone] == ("gone", None), "a missing folder keeps its saved name"
