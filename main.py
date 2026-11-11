@@ -25,6 +25,9 @@ Usage:
     python main.py mcp-usage   Show how often agents called the MCP server, per week
     python main.py install     Install as macOS Launch Agent (auto-start on login)
     python main.py uninstall   Remove Launch Agent
+    python main.py install <agent>    Add Retra's MCP server and skill to claude, codex or cursor
+    python main.py install --list     Show each agent and whether Retra is installed there
+    python main.py uninstall <agent>  Remove Retra's MCP server and skill from an agent
 """
 
 import sys
@@ -430,6 +433,38 @@ def cmd_uninstall():
         print("No Launch Agents found.")
 
 
+def cmd_install_agent(agent: str):
+    from mcp_server.install import InstallError, install, list_hosts
+
+    if agent == "--list":
+        print(list_hosts())
+        return
+    try:
+        changed = install(agent)
+    except InstallError as e:
+        print(f"[Retra] Not installed: {e}")
+        sys.exit(1)
+    if not changed:
+        print(f"[Retra] Already installed for {agent}, nothing changed")
+        return
+    for line in changed:
+        print(f"  Wrote {line}")
+    print(f"\n[Retra] Installed for {agent}. Restart the agent to pick up the MCP server.")
+
+
+def cmd_uninstall_agent(agent: str):
+    from mcp_server.install import InstallError, uninstall
+
+    try:
+        removed = uninstall(agent)
+    except InstallError as e:
+        print(f"[Retra] Not uninstalled: {e}")
+        sys.exit(1)
+    for line in removed:
+        print(f"  Removed {line}")
+    print(f"[Retra] Uninstalled from {agent}" if removed else f"[Retra] Nothing to remove for {agent}")
+
+
 COMMANDS = {
     "start": cmd_start,
     "stop": cmd_stop,
@@ -469,6 +504,10 @@ def main():
         cmd_compile(*sys.argv[2:])
     elif command in ("journal", "wiki-diff") and len(sys.argv) > 2:
         COMMANDS[command](sys.argv[2])
+    elif command == "install" and len(sys.argv) > 2:
+        cmd_install_agent(sys.argv[2])
+    elif command == "uninstall" and len(sys.argv) > 2:
+        cmd_uninstall_agent(sys.argv[2])
     elif command == "ask":
         if len(sys.argv) < 3:
             print("Usage: python main.py ask \"your question here\"")

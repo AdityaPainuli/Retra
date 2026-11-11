@@ -174,6 +174,9 @@ python main.py start
 | `python main.py mcp-usage`          | Show how often agents called the MCP server, per week   |
 | `python main.py install`            | Install as macOS Launch Agents (auto-start on login)    |
 | `python main.py uninstall`          | Remove Launch Agents                                    |
+| `python main.py install <agent>`    | Add Retra's MCP server and skill to `claude`, `codex` or `cursor` |
+| `python main.py install --list`     | Show each agent and whether Retra is installed there    |
+| `python main.py uninstall <agent>`  | Remove Retra's MCP server and skill from an agent       |
 
 ## Configuration
 
@@ -246,6 +249,7 @@ retra/
 │   └── wiki_history.py         # Git history of every wiki compile (data/wiki.git)
 ├── mcp_server/
 │   ├── server.py               # Read-only MCP tools for local agents (stdio)
+│   ├── install.py              # `install <agent>`: MCP entry + skill for claude, codex, cursor
 │   ├── status.py               # get_status and the freshness stamp on every result
 │   └── store.py                # Read-only DB access, privacy filtering, aggregation
 ├── skills/retra/SKILL.md       # Agent guide: call order, citing times, stale data, untrusted text
@@ -378,11 +382,20 @@ The server's instructions and [`skills/retra/SKILL.md`](skills/retra/SKILL.md) t
 
 The tool list is a contract with every agent that uses it. `tests/test_mcp_contract.py` pins tool names, params, defaults and annotations in `tests/snapshots/mcp_contract.json`, checks every tool and param is documented here and in the agent guide, and calls each tool against a fixture database. After a deliberate change, update both docs and refresh the snapshot with `UPDATE_SNAPSHOTS=1 venv/bin/python -m pytest tests/test_mcp_contract.py`.
 
-Register it with Claude Code (available in every project):
+Register it with your coding agents (available in every project):
 
 ```bash
-claude mcp add --scope user retra -- /path/to/retra/venv/bin/python /path/to/retra/main.py mcp
+python main.py install claude   # ~/.claude.json + ~/.claude/skills/retra/
+python main.py install codex    # ~/.codex/config.toml + ~/.agents/skills/retra/
+python main.py install cursor   # ~/.cursor/mcp.json + ~/.cursor/skills/retra/
+python main.py install --list   # where each agent stands
 ```
+
+Each install adds one `retra` entry to the agent's user-level MCP config, pointing at this checkout's `venv/bin/python` and `main.py mcp`, and copies `skills/retra/` into the agent's skill folder. Restart the agent afterwards. It never touches anything else:
+
+- Running it again changes nothing. After you pull a new skill version or move the checkout, it updates what it installed before.
+- If the `retra` entry was edited by hand or written by something else, or a skill file was edited since it was installed (tracked by sha256 in `.retra-install.json` next to the skill), it refuses and says what to fix. Nothing is written until every check passes, and each file is replaced atomically.
+- `python main.py uninstall <agent>` removes the entry and the skill files under the same rules. Files you added to the skill folder stay.
 
 For Claude desktop, add this to `~/Library/Application Support/Claude/claude_desktop_config.json` and restart the app:
 
