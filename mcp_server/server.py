@@ -27,6 +27,7 @@ from mcp_server.store import (
     MAX_RESULTS, get_db, label, load_spans, minutes, page, parse_day, parse_when, project_breakdown,
     redact_highlighted, redact_text, session_is_private, short, timeline, title_breakdown, url_breakdown,
 )
+from mcp_server import wiki_search
 from mcp_server.status import freshness, status as retra_status
 from mcp_server.usage import log_call
 
@@ -44,10 +45,12 @@ mcp = MCPServer(
         "coding_sessions for where recent Claude Code sessions stopped, day_summary "
         "for one day, search_activity to find when something was worked on, "
         "search_screen_text to find what was on screen, search_coding_sessions to "
-        "find past sessions by what was asked or done, and wiki_page for long-term "
-        "notes.\n\n"
+        "find past sessions by what was asked or done, search_wiki to find decisions "
+        "and history in the long-term notes, and wiki_page to read a note or some of its sections.\n\n"
         "How to use it: start broad (recent_work, coding_sessions), then search, then "
-        "fetch detail (day_summary, wiki_page). Cite the dates and times from results "
+        "fetch detail (day_summary, wiki_page with sections). Wiki facts may carry "
+        "a confidence label: say 'unconfirmed' for #watchlist facts and give both sides of "
+        "#contested ones. Cite the dates and times from results "
         "instead of saying 'recently'. List results carry has_more and next_offset: "
         "when has_more is true, call again with offset=next_offset before concluding. "
         "An empty result means no match in that range: "
@@ -503,21 +506,55 @@ def _wiki_dir() -> Path:
     return get_settings().obsidian.resolved_vault_path / "retra-wiki"
 
 
-@tool("wiki")
-def wiki_page(name: Optional[str] = None) -> dict:
-    """Read a page from the retra-wiki folder in the Obsidian vault (long-term
-    notes on projects, patterns, people, rollups). With no name, returns the
-    index plus the list of pages. `name` can be a page title ('retra') or a
-    relative path ('projects/retra')."""
-    wiki = _wiki_dir().resolve()
-    if not wiki.is_dir():
-        return {"error": f"wiki folder not found: {wiki}"}
-
-    pages = sorted(
+def _wiki_pages(wiki: Path) -> list[str]:
+    return sorted(
         p.relative_to(wiki).with_suffix("").as_posix()
         for p in wiki.rglob("*.md")
         if not any(part.startswith(("_", ".")) for part in p.relative_to(wiki).parts)
     )
+
+
+@tool("wiki")
+def search_wiki(query: str, project: Optional[str] = None, limit: int = 5, offset: int = 0) -> dict:
+    """Search the wiki (long-term notes: project history, decisions, people,
+    patterns) by section. Returns `page#section` refs with an excerpt, best
+    first: sections of `project`'s page first when given, then those with
+    more of the query's words, then by relevance. Read a hit whole with
+    wiki_page(name=page, sections=[section]). `labels` lists the confidence
+    labels written in the section (#confirmed, #source-backed, #contested,
+    #watchlist, #saved-context). limit max 20."""
+    from capture.window_tracker import project_aliases
+
+    wiki = _wiki_dir().resolve()
+    if not wiki.is_dir():
+        return {"error": f"wiki folder not found: {wiki}"}
+    sections = [
+        s
+        for name in _wiki_pages(wiki) if name not in wiki_search.SKIP_PAGES
+        for s in wiki_search.split_page(name, redact_text((wiki / f"{name}.md").read_text(errors="replace")))
+    ]
+    names: set[str] = set()
+    if project:
+        p = project.lower()
+        names = {p} | {a.lower() for name, alts in project_aliases().items() if p in name for a in alts}
+    hits = wiki_search.search(sections, query, names)
+    rows, paging = page(hits, offset, max(1, min(limit, 20)))
+    return {"query": query, "hits": rows, **paging}
+
+
+@tool("wiki")
+def wiki_page(name: Optional[str] = None, sections: Optional[list[str]] = None) -> dict:
+    """Read a page from the retra-wiki folder in the Obsidian vault (long-term
+    notes on projects, patterns, people, rollups). With no name, returns the
+    index plus the list of pages. `name` can be a page title ('retra') or a
+    relative path ('projects/retra'). `sections` returns only those H2/H3
+    sections (headings as search_wiki gives them, e.g. ['Notes', '2026-11-10']);
+    a page too long to return whole lists its sections."""
+    wiki = _wiki_dir().resolve()
+    if not wiki.is_dir():
+        return {"error": f"wiki folder not found: {wiki}"}
+
+    pages = _wiki_pages(wiki)
 
     if not name:
         index = wiki / "index.md"
@@ -537,9 +574,22 @@ def wiki_page(name: Optional[str] = None) -> dict:
     if not path.is_relative_to(wiki):
         return {"error": "invalid page name"}
     text = redact_text(path.read_text(errors="replace"))
+    if sections:
+        found, missing = wiki_search.read_sections(text, sections)
+        for f in found:
+            if len(f["content"]) > MAX_WIKI_CHARS:
+                f["content"] = f["content"][:MAX_WIKI_CHARS] + "\n…[truncated]"
+        out = {"page": match, "sections": found}
+        if missing:
+            out["missing"] = missing
+            out["available"] = [h for _, h, _, _ in wiki_search.headings(text)]
+        return out
+    if len(text) <= MAX_WIKI_CHARS:
+        return {"page": match, "content": text}
     return {
         "page": match,
-        "content": text[:MAX_WIKI_CHARS] + ("\n…[truncated]" if len(text) > MAX_WIKI_CHARS else ""),
+        "content": text[:MAX_WIKI_CHARS] + "\n…[truncated]",
+        "sections": [h for _, h, _, _ in wiki_search.headings(text)],
     }
 
 

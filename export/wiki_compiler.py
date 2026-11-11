@@ -388,6 +388,24 @@ def _relevant_pages(existing_pages: dict[str, str], daily_note: str) -> dict[str
     }
 
 
+# Inline confidence labels (Obsidian tags) so agents reading the wiki can tell
+# settled facts from guesses. search_wiki reports them per section.
+CONFIDENCE_RULES = """**Label each new or changed fact** (a decision, status, plan, date, cause,
+   or claim about a person) at the end of its line with one tag:
+   - `#confirmed`: seen on 2 or more distinct days, or in 2 kinds of source
+     (e.g. a coding session and a window title).
+   - `#source-backed`: one clear source (one session, one day's note).
+   - `#watchlist`: weak or early; inferred from a window title, a URL or
+     screen text seen once. Promote it only when it shows up again.
+   - `#saved-context`: something the user saved or wrote down, not proof
+     it is true.
+   - `#contested`: sources disagree. Keep both sides, each with its date and
+     source, under a `## Contested` section. Never settle a conflict by
+     picking the newer side alone.
+   Plain activity totals (minutes, session counts) need no label. Don't relabel
+   old lines unless today's data changes their confidence."""
+
+
 def _build_ingest_prompt(
     schema: str,
     daily_note: str,
@@ -483,6 +501,7 @@ TASK: Run the INGEST operation as defined in the schema.
 8. **Always emit `index.md` and `log.md`** — even if only minor. (The Python
    wrapper will regenerate index.md from the filesystem and append log.md
    itself if you omit them, but emit your best attempt.)
+9. {CONFIDENCE_RULES}
 
 OUTPUT FORMAT:
 For each file you want to create or update, output it exactly like this:
@@ -525,6 +544,8 @@ def _build_weekly_rollup_prompt(
 </existing_wiki_pages>
 
 TASK: Run the WEEKLY ROLLUP operation as defined in the schema.
+
+{CONFIDENCE_RULES}
 
 OUTPUT FORMAT:
 ===FILE: path/to/file.md===
