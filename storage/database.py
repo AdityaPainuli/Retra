@@ -308,6 +308,36 @@ class Database:
             if "repo" not in cols:
                 conn.execute("ALTER TABLE agent_sessions ADD COLUMN repo TEXT")
 
+            # Wiki claims (export/claims.py): one row per statement a wiki page
+            # makes, with the retra:// records it cites. Never edited in place:
+            # a revision is a new row and the old one gets superseded_by, so the
+            # history answers "what was true on day X". checked_on is the day
+            # the claim was last created or confirmed against new records.
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS wiki_claims (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    page TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    statement TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    valid_from TEXT NOT NULL,
+                    superseded_by INTEGER REFERENCES wiki_claims(id),
+                    retracted_at TEXT,
+                    retracted_reason TEXT,
+                    checked_on TEXT,
+                    run_id TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_wiki_claims_page ON wiki_claims(page);
+                CREATE INDEX IF NOT EXISTS idx_wiki_claims_subject ON wiki_claims(subject);
+                CREATE TABLE IF NOT EXISTS wiki_claim_evidence (
+                    claim_id INTEGER NOT NULL REFERENCES wiki_claims(id),
+                    resource TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    PRIMARY KEY (claim_id, resource)
+                );
+            """)
+
     # ── Window Events ─────────────────────────────────────────────
 
     def insert_event(self, event: WindowEvent) -> int:
