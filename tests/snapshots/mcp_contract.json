@@ -205,11 +205,52 @@
       "open_world_hint": false
     }
   },
+  "search_wiki": {
+    "params": {
+      "limit": {
+        "type": "integer",
+        "default": 5
+      },
+      "offset": {
+        "type": "integer",
+        "default": 0
+      },
+      "project": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
+      },
+      "query": {
+        "type": "string",
+        "default": null
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "annotations": {
+      "read_only_hint": true,
+      "open_world_hint": false
+    }
+  },
   "wiki_page": {
     "params": {
       "name": {
         "type": [
           "string",
+          "null"
+        ],
+        "default": null
+      },
+      "offset": {
+        "type": "integer",
+        "default": 0
+      },
+      "sections": {
+        "type": [
+          "array",
           "null"
         ],
         "default": null

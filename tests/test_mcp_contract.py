@@ -122,6 +122,7 @@ SMOKE_CALLS = {
     "coding_sessions": {},
     "search_coding_sessions": {"query": "contract"},
     "list_projects": {},
+    "search_wiki": {"query": "retra"},
     "wiki_page": {"name": "retra"},
 }
 

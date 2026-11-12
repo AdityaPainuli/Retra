@@ -332,7 +332,7 @@ Obsidian Vault/
 
 1. `python main.py journal` exports the daily note, then auto-triggers wiki compilation
 2. The wiki compiler sends the daily note + schema + the wiki pages the note mentions (by slug or `aliases:`) to Claude; other pages are listed by name only and can't be rewritten. A day whose note hasn't changed since its last successful compile is skipped (`compile --force` to redo it). Prompt size per run is printed and kept in `data/wiki_compiles.json`
-3. Claude updates project pages, pattern tracking, learning logs, and people pages
+3. Claude updates project pages, pattern tracking, learning logs, and people pages, tagging each new fact with a confidence label (`#confirmed`, `#source-backed`, `#watchlist`, `#saved-context`, or `#contested`, which keeps both sides under `## Contested`)
 4. On Sundays, a weekly rollup is auto-generated
 5. `python main.py install` schedules the full pipeline (journal + compile) daily at 23:00
 
@@ -366,7 +366,8 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `coding_sessions(project=None, days=7, limit=5, offset=0)` | Recent Claude Code sessions: where each stopped, last prompts, files edited, PRs opened |
 | `search_coding_sessions(query, since, until, limit=15, offset=0)` | Find past Claude Code sessions by what was asked or how a turn ended |
 | `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
-| `wiki_page(name=None)` | A page from `retra-wiki/` in the vault (index when no name is given) |
+| `search_wiki(query, project=None, limit=5, offset=0)` | Where something is in the wiki: `page#section` refs with excerpts and confidence labels, built fresh from the files on each call |
+| `wiki_page(name=None, sections=None, offset=0)` | A page from `retra-wiki/` in the vault (index when no name is given), or just the named sections. Long content pages by `next_offset` |
 
 It opens `data/retra.db` with SQLite `mode=ro`, makes no network calls, and hides apps and URLs matching `privacy.blocked_apps` / `blocked_url_patterns` (their time shows as `[private]`). URLs are returned without query strings. Set `RETRA_DB_PATH` to point it at a different database.
 
