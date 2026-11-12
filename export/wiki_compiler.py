@@ -23,7 +23,7 @@ except ImportError:
     _ssl_context = None
 
 from config.settings import DATA_DIR, get_settings
-from export import compile_input, pipeline_status, wiki_history
+from export import claims, compile_input, pipeline_status, wiki_history
 
 # Per page: {"page_hash", "input_fingerprint", "run_id"} of the job that last
 # wrote it. Per day: the fingerprint of the records its last complete run was
@@ -87,8 +87,12 @@ def compile_daily_note(target_date: date = None, force: bool = False):
             _sunday_rollup(target_date)
         return
 
+    # Re-resolve every live claim first: a page whose claims are flagged gets
+    # a job even when the day's records don't name it.
+    hook = claims.CompileHook(target_date, "\n".join(r.line() for r in records))
     by_ref = {r.ref: r for r in records}
     with wiki_history.lock():
+        hook.scrub_private(wiki_dir)
         run = _read_json(RUN_PATH)
         if not (run.get("date") == day and run.get("fingerprint") == fingerprint
                 and (run.get("force") or not force)):
@@ -99,8 +103,9 @@ def compile_daily_note(target_date: date = None, force: bool = False):
                 "written": [],
                 "jobs": [
                     {"page": page, "refs": [r.ref for r in recs], "status": "pending",
-                     "input_fingerprint": _fingerprint(schema, day, page, [r.line() for r in recs])}
-                    for page, recs in _plan_jobs(existing, records)
+                     "input_fingerprint": _fingerprint(schema, day, page, [r.line() for r in recs],
+                                                       [i.describe() for i in hook.issues.get(page, [])])}
+                    for page, recs in _plan_jobs(existing, records, flagged=set(hook.issues))
                 ],
             }
             _write_json(RUN_PATH, run)
@@ -112,7 +117,7 @@ def compile_daily_note(target_date: date = None, force: bool = False):
     for i, job in enumerate(run["jobs"]):
         if job["status"] == "done":
             continue
-        if not _run_job(wiki_dir, schema, target_date, run, i, [by_ref[r] for r in job["refs"]]):
+        if not _run_job(wiki_dir, schema, target_date, run, i, [by_ref[r] for r in job["refs"]], hook):
             failed += 1
 
     if failed:
@@ -140,7 +145,7 @@ def compile_daily_note(target_date: date = None, force: bool = False):
 
 
 def _run_job(wiki_dir: Path, schema: str, day: date, run: dict, i: int,
-             records: list["compile_input.Record"]) -> bool:
+             records: list["compile_input.Record"], hook: Optional["claims.CompileHook"] = None) -> bool:
     """Run job `i` of `run` (or skip it when its page was already built from
     the same records) and mark it done. Returns False if it failed."""
     job = run["jobs"][i]
@@ -161,6 +166,8 @@ def _run_job(wiki_dir: Path, schema: str, day: date, run: dict, i: int,
     else:
         prompt = _build_page_prompt(schema, day.isoformat(), existing, page, records)
         editable = {page}
+    if hook:
+        prompt += hook.prompt_section(editable)
     print(f"[Retra] Wiki job {page}: {len(prompt):,} chars, {len(records)} records")
 
     response = _call_claude(prompt)
@@ -175,7 +182,8 @@ def _run_job(wiki_dir: Path, schema: str, day: date, run: dict, i: int,
     # Saved under the same lock as the pages, so the manifest always
     # describes the pages on disk even when two compiles race.
     _write_and_record(wiki_dir, response, "ingest", day, log_entry=False, editable=editable,
-                      after=lambda written: _finish_job(run, i, written, len(prompt), wiki_dir))
+                      after=lambda written: _finish_job(run, i, written, len(prompt), wiki_dir),
+                      post_write=hook.after_write if hook else None)
     return True
 
 
@@ -495,11 +503,12 @@ CONFIDENCE_RULES = """**Label each new or changed fact** (a decision, status, pl
    old lines unless today's data changes their confidence."""
 
 
-def _plan_jobs(existing_pages: dict[str, str],
-               records: list["compile_input.Record"]) -> list[tuple[str, list["compile_input.Record"]]]:
+def _plan_jobs(existing_pages: dict[str, str], records: list["compile_input.Record"],
+               flagged: set[str] = frozenset()) -> list[tuple[str, list["compile_input.Record"]]]:
     """One job per page the day's records touch, with only those records,
-    then a NEW_PAGES_JOB for attributed sessions and spans no page claims.
-    The day's stats go to every patterns/ page (or to the new-pages job while
+    plus one per `flagged` page (claims needing a decision), then a
+    NEW_PAGES_JOB for attributed sessions and spans no page claims. The
+    day's stats go to every patterns/ page (or to the new-pages job while
     there are none)."""
     pages = {p: c for p, c in existing_pages.items() if p not in ("index.md", "log.md")}
     names = {p: _page_names(p, c) for p, c in pages.items()}
@@ -521,7 +530,7 @@ def _plan_jobs(existing_pages: dict[str, str],
             by_page[p].insert(0, day_record)
         if unclaimed and not patterns:
             unclaimed.insert(0, day_record)
-    jobs = [(p, recs) for p, recs in sorted(by_page.items()) if recs]
+    jobs = [(p, recs) for p, recs in sorted(by_page.items()) if recs or p in flagged]
     if unclaimed:
         jobs.append((NEW_PAGES_JOB, unclaimed))
     return jobs
@@ -810,7 +819,8 @@ def _call_claude(prompt: str) -> Optional[str]:
 
 def _write_and_record(wiki_dir: Path, response: str, kind: str, when: date,
                       log_entry: bool = True, editable: Optional[set[str]] = None,
-                      after: Optional[Callable[[list[str]], None]] = None) -> list[str]:
+                      after: Optional[Callable[[list[str]], None]] = None,
+                      post_write: Optional[Callable[[Path, str, list[str]], object]] = None) -> list[str]:
     """Apply an LLM response and keep both sides in history: the wiki as it
     was (first compile, or edits made in Obsidian since the last one), then
     the result. Holds the wiki lock throughout so concurrent compiles from
@@ -818,6 +828,8 @@ def _write_and_record(wiki_dir: Path, response: str, kind: str, when: date,
     with wiki_history.lock():
         wiki_history.commit(wiki_dir, f"before {kind} {when.isoformat()}: earlier state and manual edits")
         written = _apply_wiki_updates(wiki_dir, response, editable)
+        if post_write:  # D1: claims decisions and sources/verified stamps
+            post_write(wiki_dir, response, written)
         summary = _summarize_written(written)
         if log_entry:
             _append_log_entry(wiki_dir, when, kind=kind, summary=summary)

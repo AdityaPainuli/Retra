@@ -124,6 +124,7 @@ SMOKE_CALLS = {
     "list_projects": {},
     "search_wiki": {"query": "retra"},
     "wiki_page": {"name": "retra"},
+    "facts": {"subject": "retra"},
 }
 
 

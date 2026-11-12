@@ -13,6 +13,7 @@ Retra runs on the user's Mac and records which apps, windows and URLs were activ
 2. **Start broad.** `recent_work` or `list_projects` for what the user has been on, `coding_sessions` for where recent Claude Code sessions stopped. For "right now", `current_activity`.
 3. **Search.** `search_activity` (when something was worked on), `search_screen_text` (what was on screen), `search_coding_sessions` (what was asked or done in a session), `search_wiki` (decisions and history in the long-term notes).
 4. **Fetch detail.** `day_summary` for one day, `wiki_page` for long-term notes on a project, person or pattern. Read only the sections you need with `wiki_page(name, sections=[...])`: project pages are long.
+5. **Decisions over time.** For "what did I decide about X, and did it change?", `facts(subject=X)`; add `as_of` for what held on a past day.
 
 For "what was I doing Friday and what's next?": `day_summary(day=<Friday's date>)`, then `coding_sessions(days=<days since Friday>)` for where each session stopped, then `wiki_page(name=<project>, sections=["Notes"])` for open threads. For "what did I decide about X?": `search_wiki(query="X")`, then read the hits' sections.
 
@@ -90,3 +91,10 @@ A page from the compiled wiki. With no name, returns the index. A page too long 
 - `name`: page title (`retra`) or relative path (`projects/retra`)
 - `sections`: return only these H2/H3 sections, whole, every occurrence of a repeated heading (`["Notes"]`, `["2026-11-10"]`). Unknown names come back in `missing`, with the page's `available` headings
 - `offset` (default 0): content over 12000 characters is cut and carries `next_offset`; call again with `offset=next_offset` for the rest
+
+### facts
+Facts the wiki holds about a project, person or topic, newest first. Each has `valid_from` (the day it became true), `confidence`, the `evidence` it cites (`status` is `ok`, `changed` since the fact was written, or `gone`), and `replaced`: earlier values with the day each stopped holding. Use it for "what did I decide about X, and did it change?". `confidence` is `confirmed` (seen on 2+ days or in 2+ kinds of record), `source-backed` (one session or day), `watchlist` (only a window title or screen text, once: say "unconfirmed") or `contested` (records disagree: give both sides). Evidence that is `changed` or `gone` means the fact may be out of date; check the raw tools.
+- `subject`: project slug (`retra`), person, or `project/topic` key (`retra/launch-date`). A project also returns its topic keys.
+- `as_of`: `YYYY-MM-DD`, `today` or `yesterday`: what held on that day; `changed_to` says what it became later
+- `limit` (default 20, max 50)
+- `offset` (default 0): where the page starts, from `next_offset`

@@ -373,6 +373,7 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
 | `search_wiki(query, project=None, limit=5, offset=0)` | Where something is in the wiki: `page#section` refs with excerpts and confidence labels, built fresh from the files on each call |
 | `wiki_page(name=None, sections=None, offset=0)` | A page from `retra-wiki/` in the vault (index when no name is given), or just the named sections. Long content pages by `next_offset` |
+| `facts(subject, as_of=None, limit=20, offset=0)` | What the wiki holds true about a project or topic: when each fact became true, its confidence label, the records it cites, and what it replaced (or, with `as_of`, what held on that day) |
 
 It opens `data/retra.db` with SQLite `mode=ro`, makes no network calls, and hides apps and URLs matching `privacy.blocked_apps` / `blocked_url_patterns` (their time shows as `[private]`). URLs are returned without query strings. Set `RETRA_DB_PATH` to point it at a different database.
 

@@ -22,6 +22,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from config.settings import get_settings
+from export import claims
 from mcp_server.store import (
     active_hours, app_breakdown, category_breakdown, compact_url, filter_project,
     MAX_RESULTS, get_db, label, load_spans, minutes, page, parse_day, parse_when, project_breakdown,
@@ -46,7 +47,9 @@ mcp = MCPServer(
         "for one day, search_activity to find when something was worked on, "
         "search_screen_text to find what was on screen, search_coding_sessions to "
         "find past sessions by what was asked or done, search_wiki to find decisions "
-        "and history in the long-term notes, and wiki_page to read a note or some of its sections.\n\n"
+        "and history in the long-term notes, wiki_page to read a note or some of its sections, "
+        "and facts for what the wiki holds true about a project or topic, "
+        "when it became true and what it replaced (as_of for a past day).\n\n"
         "How to use it: start broad (recent_work, coding_sessions), then search, then "
         "fetch detail (day_summary, wiki_page with sections). Wiki facts may carry "
         "a confidence label: say 'unconfirmed' for #watchlist facts and give both sides of "
@@ -598,6 +601,41 @@ def wiki_page(name: Optional[str] = None, sections: Optional[list[str]] = None, 
     if "next_offset" in out:
         out["sections"] = [h for _, h, _, _ in wiki_search.headings(text)]
     return out
+
+
+@tool("wiki")
+def facts(subject: str, as_of: Optional[str] = None, limit: int = 20, offset: int = 0) -> dict:
+    """What the wiki holds true about `subject` (a project slug, person or
+    'project/topic' key; 'retra' also returns 'retra/...' keys), each with
+    the day it became true, its confidence label, the records it cites and
+    the earlier values it replaced. With `as_of` (YYYY-MM-DD, 'today',
+    'yesterday'), what held on that day, plus `changed_to` when it changed
+    later. Facts citing records that are now private are left out."""
+    if not subject or not subject.strip():
+        return {"error": "subject is required"}
+    day = parse_day(as_of) if as_of else None
+    limit = max(1, min(limit, 50))
+    with get_db()._conn() as conn:
+        out = []
+        for f in claims.facts(conn, subject, day):
+            ev, private = [], False
+            for e in f["evidence"]:
+                r = claims.check(conn, e["resource"])
+                if r.status == "private":
+                    private = True
+                    break
+                state = ("changed" if r.version != e["version"] else "ok") if r.status == "ok" else "gone"
+                ev.append({"resource": e["resource"], "status": state})
+            if private or redact_text(f["statement"]) != f["statement"]:
+                continue
+            f["evidence"] = ev
+            f["replaced"] = [p for p in f["replaced"] if redact_text(p["statement"]) == p["statement"]]
+            if "changed_to" in f and redact_text(f["changed_to"]["statement"]) != f["changed_to"]["statement"]:
+                del f["changed_to"]
+            out.append(f)
+    items, paging = page(out, offset, limit)
+    return {"subject": subject.strip().lower(), "as_of": day.isoformat() if day else None,
+            "facts": items, **paging}
 
 
 def run():
