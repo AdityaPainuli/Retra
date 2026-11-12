@@ -254,3 +254,76 @@ def test_codex_replaces_table_in_the_middle(home, root, tmp_path):
     assert doc["mcp_servers"]["retra"] == server_entry("codex", moved)
     assert doc["mcp_servers"]["first"] == {"command": "a"}
     assert doc["profiles"] == {"work": {"model": "o3"}}
+
+
+# ── Review fixes ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("bad", ["../../../notes.txt", "/etc/hosts", "", "reference/../../escape.md"])
+def test_receipt_paths_outside_the_skill_are_refused(home, root, bad):
+    from mcp_server import install as inst
+    notes = home / "notes.txt"
+    notes.write_text("mine\n")
+    install("cursor", home, root)
+    receipt_path = skill_dir(home, "cursor") / RECEIPT_NAME
+    receipt = json.loads(receipt_path.read_text())
+    receipt["files"][bad] = inst._sha256(notes.read_bytes())
+    receipt_path.write_text(json.dumps(receipt))
+    for run in (uninstall, install):
+        with pytest.raises(InstallError, match="edited by hand"):
+            run("cursor", home, root)
+    assert notes.read_text() == "mine\n"
+
+
+def test_codex_install_from_a_path_with_an_emoji(home, root, tmp_path):
+    import shutil
+    fancy = tmp_path / "retra \U0001F680"
+    shutil.copytree(root, fancy)
+    install("codex", home, fancy)
+    assert read_servers(home, "codex")["retra"] == server_entry("codex", fancy)
+
+
+def test_codex_config_with_a_date_value(home, root):
+    seed_config(home, "codex")
+    path = config_path(home, "codex")
+    path.write_text("last_used = 2026-01-01\n" + path.read_text())
+    install("codex", home, root)
+    assert "installed" in list_hosts(home, root)
+    uninstall("codex", home, root)
+    assert tomllib.loads(path.read_text())["last_used"].isoformat() == "2026-01-01"
+
+
+def test_config_changed_after_it_was_read_is_not_overwritten(home, root, monkeypatch):
+    from mcp_server import install as inst
+    seed_config(home, "cursor")
+    path = config_path(home, "cursor")
+    real_open = inst._open_config
+
+    def open_then_someone_saves(host, h):
+        config = real_open(host, h)
+        path.write_text(json.dumps({"mcpServers": {"other": OTHER_SERVER, "new": OTHER_SERVER}}))
+        return config
+
+    monkeypatch.setattr(inst, "_open_config", open_then_someone_saves)
+    with pytest.raises(InstallError, match="changed while Retra was editing it"):
+        install("cursor", home, root)
+    assert set(json.loads(path.read_text())["mcpServers"]) == {"other", "new"}
+    assert not skill_dir(home, "cursor").exists()
+
+
+def test_install_holds_the_lock(home, root, monkeypatch):
+    import fcntl
+    from mcp_server import install as inst
+    real_plan = inst._plan_install
+    seen = []
+
+    def plan(*args):
+        with open(root / "data" / inst.LOCK_NAME, "w") as f:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        seen.append(True)
+        return real_plan(*args)
+
+    monkeypatch.setattr(inst, "_plan_install", plan)
+    install("cursor", home, root)
+    assert seen

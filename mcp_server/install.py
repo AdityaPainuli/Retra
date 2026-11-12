@@ -15,6 +15,8 @@ Every check runs before the first write, and every write is atomic.
 
 from __future__ import annotations
 
+import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -22,6 +24,7 @@ import re
 import sys
 import tempfile
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SERVER_NAME = "retra"
 SKILL_NAME = "retra"
 RECEIPT_NAME = ".retra-install.json"
+LOCK_NAME = "agent-install.lock"
 
 # User-level locations, relative to the home dir.
 HOSTS = {
@@ -81,6 +85,17 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+@contextmanager
+def _install_lock(root: Path):
+    """One install or uninstall at a time, so two runs can't interleave
+    their check-then-write steps."""
+    path = root / "data" / LOCK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def _atomic_write(path: Path, data: bytes):
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode & 0o777 if path.exists() else None
@@ -104,7 +119,8 @@ def _atomic_write(path: Path, data: bytes):
 class _JsonConfig:
     def __init__(self, path: Path, key: str):
         self.path, self.key = path, key
-        text = path.read_text() if path.exists() else ""
+        self.raw = path.read_bytes() if path.exists() else None
+        text = self.raw.decode() if self.raw is not None else ""
         try:
             self.doc = json.loads(text) if text.strip() else {}
         except json.JSONDecodeError as e:
@@ -116,7 +132,7 @@ class _JsonConfig:
         return self.doc.get(self.key, {}).get(SERVER_NAME)
 
     def render(self, entry: dict | None) -> bytes:
-        doc = json.loads(json.dumps(self.doc))
+        doc = copy.deepcopy(self.doc)
         servers = doc.setdefault(self.key, {})
         if entry is None:
             servers.pop(SERVER_NAME, None)
@@ -132,7 +148,8 @@ class _TomlConfig:
 
     def __init__(self, path: Path, key: str):
         self.path, self.key = path, key
-        self.text = path.read_text() if path.exists() else ""
+        self.raw = path.read_bytes() if path.exists() else None
+        self.text = self.raw.decode() if self.raw is not None else ""
         try:
             self.doc = tomllib.loads(self.text)
         except tomllib.TOMLDecodeError as e:
@@ -157,11 +174,13 @@ class _TomlConfig:
         text = self._without_table()
         if entry is not None:
             lines = [f"[{self.key}.{SERVER_NAME}]"]
-            lines += [f"{k} = {json.dumps(v)}" for k, v in entry.items()]
+            # JSON's escapes are valid TOML, except its surrogate pairs for
+            # characters outside the BMP: keep those as UTF-8.
+            lines += [f"{k} = {json.dumps(v, ensure_ascii=False)}" for k, v in entry.items()]
             text = (text + "\n\n" if text else "") + "\n".join(lines)
         text = text + "\n" if text else ""
 
-        expected = json.loads(json.dumps(self.doc))
+        expected = copy.deepcopy(self.doc)
         servers = expected.setdefault(self.key, {})
         if entry is None:
             servers.pop(SERVER_NAME, None)
@@ -182,6 +201,15 @@ class _TomlConfig:
 def _drop_empty(doc: dict, key: str) -> dict:
     """`[mcp_servers]` with nothing left in it parses the same as no table."""
     return {k: v for k, v in doc.items() if not (k == key and v == {})}
+
+
+def _write_config(config, data: bytes):
+    """Write the config unless it changed since it was read (an agent or
+    the user saved it meanwhile), which would otherwise be overwritten."""
+    now = config.path.read_bytes() if config.path.exists() else None
+    if now != config.raw:
+        raise InstallError(f"{config.path} changed while Retra was editing it; run the command again.")
+    _atomic_write(config.path, data)
 
 
 def _open_config(host: dict, home: Path):
@@ -209,9 +237,20 @@ def _read_receipt(skill_dir: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        receipt = json.loads(path.read_text())
     except json.JSONDecodeError:
         raise InstallError(f"{path} is unreadable; remove {skill_dir} by hand if you no longer need it.")
+    # Install and uninstall delete the files a receipt lists, so each must
+    # stay inside the skill directory.
+    files = receipt.get("files", {}) if isinstance(receipt, dict) else None
+    root = skill_dir.resolve()
+    if not isinstance(files, dict) or not all(
+        isinstance(rel, str) and rel and not Path(rel).is_absolute() and ".." not in Path(rel).parts
+        and (skill_dir / rel).resolve().is_relative_to(root) and (skill_dir / rel).resolve() != root
+        for rel in files
+    ):
+        raise InstallError(f"{path} was edited by hand; remove {skill_dir} by hand if you no longer need it.")
+    return receipt
 
 
 def _edited(skill_dir: Path, rel: str, receipt_files: dict) -> bool:
@@ -298,10 +337,15 @@ def _plan_install(agent: str, home: Path, root: Path) -> Plan:
 def install(agent: str, home: Path | None = None, root: Path = PROJECT_ROOT) -> list[str]:
     """Install for one agent. Returns what changed (empty = already installed)."""
     home = home or Path.home()
+    with _install_lock(root):
+        return _install(agent, home, root)
+
+
+def _install(agent: str, home: Path, root: Path) -> list[str]:
     plan = _plan_install(agent, home, root)
     changed = []
     if plan.config_bytes is not None:
-        _atomic_write(plan.config.path, plan.config_bytes)
+        _write_config(plan.config, plan.config_bytes)
         changed.append(f"MCP server `{SERVER_NAME}` in {plan.config.path}")
     for rel, data in plan.writes.items():
         _atomic_write(plan.skill_dir / rel, data)
@@ -318,6 +362,11 @@ def uninstall(agent: str, home: Path | None = None, root: Path = PROJECT_ROOT) -
     """Remove Retra's MCP entry and skill files for one agent, but only what
     is exactly as Retra left it. Returns what was removed."""
     home = home or Path.home()
+    with _install_lock(root):
+        return _uninstall(agent, home, root)
+
+
+def _uninstall(agent: str, home: Path, root: Path) -> list[str]:
     host = _host(agent)
     config = _open_config(host, home)
     skill_dir = home / host["user"]["skillDirectory"] / SKILL_NAME
@@ -342,7 +391,7 @@ def uninstall(agent: str, home: Path | None = None, root: Path = PROJECT_ROOT) -
 
     removed = []
     if current is not None:
-        _atomic_write(config.path, config.render(None))
+        _write_config(config, config.render(None))
         removed.append(f"MCP server `{SERVER_NAME}` from {config.path}")
     for rel in files:
         path = skill_dir / rel
