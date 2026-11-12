@@ -92,6 +92,7 @@ def compile_daily_note(target_date: date = None, force: bool = False):
     hook = claims.CompileHook(target_date, "\n".join(r.line() for r in records))
     by_ref = {r.ref: r for r in records}
     with wiki_history.lock():
+        hook.scrub_private(wiki_dir)
         run = _read_json(RUN_PATH)
         if not (run.get("date") == day and run.get("fingerprint") == fingerprint
                 and (run.get("force") or not force)):

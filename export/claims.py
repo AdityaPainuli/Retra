@@ -32,7 +32,7 @@ import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import parse_qs, unquote
@@ -80,7 +80,8 @@ def _session(conn, key: str) -> Resolution:
         return Resolution("gone", "session")
     if session_is_private(row):
         return Resolution("private", "session")
-    version = _hash([row[k] for k in ("title", "ended_at", "prompt_count", "prs", "last_status")])
+    version = _hash([row[k] for k in ("title", "branch", "ended_at", "prompt_count", "files", "prs",
+                                      "last_status", "last_reply")])
     snippet = _short(f"{row['title'] or ''}: {row['last_status'] or ''}")
     return Resolution("ok", "session", version, snippet, (row["started_at"] or row["ended_at"] or "")[:10])
 
@@ -226,10 +227,10 @@ class Issue:
         }[self.kind]
 
 
-def day_subjects(conn: sqlite3.Connection, day: date) -> set[str]:
-    """Lowercased project and repo names with activity on `day`, for
-    subject staleness."""
-    start, end = day.isoformat(), f"{day.isoformat()}T23:59:59.999999"
+def day_subjects(conn: sqlite3.Connection, day: date, since: Optional[date] = None) -> set[str]:
+    """Lowercased project and repo names with activity from `since`
+    (default: `day`) through `day`, for subject staleness."""
+    start, end = (since or day).isoformat(), f"{day.isoformat()}T23:59:59.999999"
     names: set[str] = set()
     try:
         for r in conn.execute("SELECT project, repo FROM agent_sessions WHERE started_at <= ? AND ended_at >= ?",
@@ -249,7 +250,8 @@ def _about(subject: str, names: set[str]) -> bool:
 
 
 def claim_issues(conn: sqlite3.Connection, claim: sqlite3.Row, day: Optional[date] = None,
-                 subjects: Optional[set[str]] = None) -> list[Issue]:
+                 subjects: Optional[dict[date, set[str]]] = None) -> list[Issue]:
+    """`subjects` caches day_subjects by start day across calls."""
     issues = []
     for e in evidence(conn, claim["id"]):
         r = check(conn, e["resource"])
@@ -260,13 +262,20 @@ def claim_issues(conn: sqlite3.Connection, claim: sqlite3.Row, day: Optional[dat
         elif r.version != e["version"]:
             issues.append(Issue(claim["id"], "stale", e["resource"]))
     checked = claim["checked_on"] or claim["valid_from"]
-    if day and subjects and checked < day.isoformat() and _about(claim["subject"], subjects):
-        issues.append(Issue(claim["id"], "recheck"))
+    if day and checked < day.isoformat():
+        # Any activity since the claim was last checked, not just today's:
+        # a recheck the model skipped stays due until it decides.
+        since = date.fromisoformat(checked[:10]) + timedelta(days=1)
+        subjects = {} if subjects is None else subjects
+        if since not in subjects:
+            subjects[since] = day_subjects(conn, day, since)
+        if _about(claim["subject"], subjects[since]):
+            issues.append(Issue(claim["id"], "recheck"))
     return issues
 
 
 def page_issues(conn: sqlite3.Connection, page: str, day: Optional[date] = None) -> list[Issue]:
-    subjects = day_subjects(conn, day) if day else None
+    subjects: dict[date, set[str]] = {}
     return [i for c in live_claims(conn, page) for i in claim_issues(conn, c, day, subjects)]
 
 
@@ -279,7 +288,7 @@ def preflight(conn: sqlite3.Connection, day: Optional[date] = None) -> dict[str,
     the blocklist now covers are retracted here and never shown to the
     model: privacy, not accuracy, so they are dropped, not reworded.
     Returns the remaining issues by page; those pages need a job."""
-    subjects = day_subjects(conn, day) if day else None
+    subjects: dict[date, set[str]] = {}
     out: dict[str, list[Issue]] = {}
     private: list[int] = []
     for c in live_claims(conn):
@@ -351,7 +360,14 @@ def apply_decisions(conn: sqlite3.Connection, page: str, decisions: dict, *, day
         proposed = []
 
     live = {c["id"]: c for c in live_claims(conn, page)}
-    revised = [c["id"] for c in proposed if c.get("id") is not None]
+    revised = []
+    for n, c in enumerate(proposed):
+        if c.get("id") is None:
+            continue
+        if isinstance(c["id"], int) and not isinstance(c["id"], bool):
+            revised.append(c["id"])
+        else:
+            errors.append(f"claims[{n}].id must be a claim id")
     for i, n in Counter(confirmed + retracted + revised).items():
         if i not in live:
             errors.append(f"claim {i} is not a live claim on {page}")
@@ -361,7 +377,7 @@ def apply_decisions(conn: sqlite3.Connection, page: str, decisions: dict, *, day
     checked: list[tuple[dict, str, str, list[tuple[str, Resolution]], Optional[sqlite3.Row]]] = []
     for n, c in enumerate(proposed):
         where = f"claims[{n}]"
-        old = live.get(c.get("id"))
+        old = live.get(c["id"]) if c.get("id") in revised else None
         subject = str(c.get("subject") or (old["subject"] if old else "")).strip().lower()
         statement = " ".join(str(c.get("statement") or "").split())
         refs = c.get("evidence") or []
@@ -454,9 +470,12 @@ def facts(conn: sqlite3.Connection, subject: str, as_of: Optional[date] = None) 
     by_id = {r["id"]: r for r in rows}
     cutoff = (as_of or date.max).isoformat()
     preds: dict[int, list[sqlite3.Row]] = {}
-    for r in rows:
-        if r["superseded_by"] is not None:
-            preds.setdefault(r["superseded_by"], []).append(r)
+
+    def predecessors(cid: int) -> list[sqlite3.Row]:
+        # Looked up by id, not subject: a revision may have moved the claim.
+        if cid not in preds:
+            preds[cid] = conn.execute("SELECT * FROM wiki_claims WHERE superseded_by = ?", (cid,)).fetchall()
+        return preds[cid]
 
     def successor(r) -> Optional[sqlite3.Row]:
         # A revision may have moved the claim to another subject.
@@ -481,13 +500,13 @@ def facts(conn: sqlite3.Connection, subject: str, as_of: Optional[date] = None) 
     for r in rows:
         if not held(r):
             continue
-        replaced, stack = [], list(preds.get(r["id"], []))
+        replaced, stack = [], list(predecessors(r["id"]))
         while stack:
             p = stack.pop()
             if not p["retracted_at"]:
                 replaced.append({"id": p["id"], "statement": p["statement"],
                                  "valid_from": p["valid_from"], "until": ends(p)})
-            stack.extend(preds.get(p["id"], []))
+            stack.extend(predecessors(p["id"]))
         fact = {
             "id": r["id"], "subject": r["subject"], "statement": r["statement"], "page": r["page"],
             "confidence": r["confidence"], "valid_from": r["valid_from"],
@@ -597,6 +616,33 @@ class CompileHook:
             with self._db._conn() as conn:
                 self.issues = preflight(conn, day)
 
+    def scrub_private(self, wiki_dir: Path) -> list[str]:
+        """Drop every wiki line that cites a record the blocklist now covers,
+        before any page is sent to the model. The compiler cites records
+        inline, so the citing line is the fact that came from it. Returns
+        the pages changed. Call with the wiki lock held."""
+        if not self.active:
+            return []
+        root = Path(wiki_dir).resolve()
+        private: dict[str, bool] = {}
+        changed = []
+        with self._db._conn() as conn:
+            for path in sorted(root.rglob("*.md")):
+                rel = path.relative_to(root).as_posix()
+                if rel == "CLAUDE.md" or any(part.startswith(".") for part in path.relative_to(root).parts):
+                    continue
+                text = path.read_text(encoding="utf-8")
+                for ref in set(find_refs(text)) - private.keys():
+                    private[ref] = check(conn, ref).status == "private"
+                lines = text.splitlines(keepends=True)
+                kept = [l for l in lines if not any(private[r] for r in find_refs(l))]
+                if len(kept) != len(lines):
+                    path.write_text("".join(kept), encoding="utf-8")
+                    changed.append(rel)
+        if changed:
+            print(f"[Retra] Removed lines citing now-private records from {len(changed)} wiki pages")
+        return changed
+
     def prompt_section(self, pages: Iterable[str]) -> str:
         """The claims block for one compile job: the rules, then the live
         claims of the job's pages with their flags."""
@@ -613,6 +659,7 @@ class CompileHook:
         if not self.active:
             return {}
         root = Path(wiki_dir).resolve()
+        accepted: set[str] = set()
         with self._db._conn() as conn:
             for page, raw in _CLAIMS_BLOCK_RE.findall(response or ""):
                 page = page.strip()
@@ -626,19 +673,24 @@ class CompileHook:
                 try:
                     self.results[page] = apply_decisions(conn, page, json.loads(raw), day=self.day,
                                                          run_id=self.run_id)
+                    accepted.add(page)
                 except (ClaimsRejected, ValueError) as e:
                     self.results[page] = {"rejected": getattr(e, "errors", [str(e)])}
                     print(f"  Claims rejected for {page}: {e}")
             # Pages outside this compile keep their stamp; preflight put any
-            # page with new issues into self.issues.
-            for page in sorted(set(written) | set(self.results) | set(self.issues)):
+            # page with new issues into self.issues. A rejected block names
+            # an arbitrary path, so only the job's own pages are stamped.
+            for page in sorted(set(written) | self._shown | set(self.issues)):
                 full = (root / page).resolve()
-                if not full.is_relative_to(root) or not full.exists():
+                if (not full.is_relative_to(root) or full.suffix != ".md" or not full.is_file()
+                        or page in ("CLAUDE.md", "index.md", "log.md")):
                     continue
                 st = page_status(conn, page, self.day)
+                # A rewritten page is verified only when its claims were too.
+                verified = st["verified"] and (page not in written or page in accepted)
                 text = full.read_text(encoding="utf-8")
-                stamped = stamp_frontmatter(text, st["sources"], self.run_id if st["verified"] else None)
+                stamped = stamp_frontmatter(text, st["sources"], self.run_id if verified else None)
                 if stamped != text:
                     full.write_text(stamped, encoding="utf-8")
-                self.results.setdefault(page, {})["verified"] = st["verified"]
+                self.results.setdefault(page, {})["verified"] = verified
         return self.results

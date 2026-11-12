@@ -360,3 +360,62 @@ def test_facts_tool(retra, monkeypatch):
     then = asyncio.run(call(subject="retra/launch-date", as_of=FRI.isoformat()))
     assert [f["statement"] for f in then["facts"]] == ["Retra launches on Friday"]
     assert then["facts"][0]["changed_to"]["valid_from"] == MON.isoformat()
+
+
+# ── Review fixes ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("bad", [{}, [], True, "1"])
+def test_bad_revision_id_is_rejected_not_a_crash(conn, bad):
+    add(conn, FRI, claim("Retra launches on Friday", "retra://session/s-fri"))
+    with pytest.raises(ClaimsRejected, match=r"claims\[0\]\.id must be a claim id"):
+        add(conn, FRI, claim("Retra launches on Monday", "retra://session/s-fri", id=bad))
+
+
+def test_session_version_covers_its_reply_and_files(conn):
+    before = check(conn, "retra://session/s-fri").version
+    conn.execute("UPDATE agent_sessions SET last_reply = 'corrected', files = '[\"a.py\"]' WHERE session_id = 's-fri'")
+    assert check(conn, "retra://session/s-fri").version != before
+
+
+def test_skipped_recheck_stays_due(conn):
+    add(conn, FRI, claim("Retra launches on Friday", "retra://session/s-fri"))
+    # Monday had retra activity; Tuesday has none, but the claim was never rechecked.
+    assert [i.kind for i in preflight(conn, MON + timedelta(days=1))[PAGE]] == ["recheck"]
+
+
+def test_history_follows_a_claim_to_its_new_subject(conn):
+    first = add(conn, FRI, claim("Retra launches on Friday", "retra://session/s-fri"))["added"][0]
+    add(conn, MON, claim("Retra releases on Monday", "retra://session/s-mon", id=first, subject="retra/release-date"))
+    [f] = facts(conn, "retra/release-date")
+    assert [p["id"] for p in f["replaced"]] == [first]
+
+
+def _hook(db, tmp_path, day=FRI):
+    wiki = tmp_path / "wiki"
+    (wiki / "projects").mkdir(parents=True, exist_ok=True)
+    (wiki / "CLAUDE.md").write_text("schema\n")
+    (wiki / PAGE).write_text("---\ntitle: Retra\n---\n# Retra\n- launch Friday (retra://session/s-fri)\n")
+    return wiki, claims.CompileHook(day, "retra://session/s-fri", db_path=db.db_path)
+
+
+def test_rejected_claims_block_withholds_verified_and_touches_nothing_else(db, tmp_path):
+    with db._conn() as c:
+        add(c, FRI, claim("Retra launches on Friday", "retra://session/s-fri"))
+    wiki, hook = _hook(db, tmp_path)
+    hook.prompt_section([PAGE])
+    out = hook.after_write(wiki, f"===CLAIMS: {PAGE}===\n{{\"claims\": 5}}\n===END_CLAIMS===\n"
+                                 "===CLAIMS: CLAUDE.md===\n{}\n===END_CLAIMS===\n", [PAGE])
+    assert out[PAGE]["verified"] is False and "verified:" not in (wiki / PAGE).read_text()
+    assert (wiki / "CLAUDE.md").read_text() == "schema\n"
+
+    # The same page with an accepted (empty) batch is verified.
+    hook.after_write(wiki, f"===CLAIMS: {PAGE}===\n{{}}\n===END_CLAIMS===\n", [PAGE])
+    assert "verified: " in (wiki / PAGE).read_text()
+
+
+def test_lines_citing_private_records_are_removed_before_compile(db, tmp_path):
+    _session(db, "s-bank", FRI, "Sort out the bank login")
+    wiki, hook = _hook(db, tmp_path)
+    (wiki / PAGE).write_text("# Retra\n- launch Friday (retra://session/s-fri)\n- bank login (retra://session/s-bank)\n")
+    assert hook.scrub_private(wiki) == [PAGE]
+    assert (wiki / PAGE).read_text() == "# Retra\n- launch Friday (retra://session/s-fri)\n"
