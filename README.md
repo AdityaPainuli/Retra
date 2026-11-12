@@ -367,7 +367,7 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `search_coding_sessions(query, since, until, limit=15, offset=0)` | Find past Claude Code sessions by what was asked or how a turn ended |
 | `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
 | `search_wiki(query, project=None, limit=5, offset=0)` | Where something is in the wiki: `page#section` refs with excerpts and confidence labels, built fresh from the files on each call |
-| `wiki_page(name=None, sections=None)` | A page from `retra-wiki/` in the vault (index when no name is given), or just the named sections |
+| `wiki_page(name=None, sections=None, offset=0)` | A page from `retra-wiki/` in the vault (index when no name is given), or just the named sections. Long content pages by `next_offset` |
 
 It opens `data/retra.db` with SQLite `mode=ro`, makes no network calls, and hides apps and URLs matching `privacy.blocked_apps` / `blocked_url_patterns` (their time shows as `[private]`). URLs are returned without query strings. Set `RETRA_DB_PATH` to point it at a different database.
 

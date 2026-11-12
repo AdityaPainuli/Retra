@@ -88,4 +88,5 @@ Find where something is in the compiled wiki, by section. Hits are `page#section
 ### wiki_page
 A page from the compiled wiki. With no name, returns the index. A page too long to return whole is truncated and lists its `sections`.
 - `name`: page title (`retra`) or relative path (`projects/retra`)
-- `sections`: return only these H2/H3 sections, whole (`["Notes"]`, `["2026-11-10"]`). Unknown names come back in `missing`, with the page's `available` headings
+- `sections`: return only these H2/H3 sections, whole, every occurrence of a repeated heading (`["Notes"]`, `["2026-11-10"]`). Unknown names come back in `missing`, with the page's `available` headings
+- `offset` (default 0): content over 12000 characters is cut and carries `next_offset`; call again with `offset=next_offset` for the rest

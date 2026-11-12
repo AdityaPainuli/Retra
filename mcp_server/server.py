@@ -528,28 +528,40 @@ def search_wiki(query: str, project: Optional[str] = None, limit: int = 5, offse
     wiki = _wiki_dir().resolve()
     if not wiki.is_dir():
         return {"error": f"wiki folder not found: {wiki}"}
-    sections = [
-        s
-        for name in _wiki_pages(wiki) if name not in wiki_search.SKIP_PAGES
-        for s in wiki_search.split_page(name, redact_text((wiki / f"{name}.md").read_text(errors="replace")))
-    ]
+    sections = []
+    for name in _wiki_pages(wiki):
+        path = (wiki / f"{name}.md").resolve()
+        # A symlinked page can point anywhere; only read files inside the wiki.
+        if name in wiki_search.SKIP_PAGES or not path.is_relative_to(wiki):
+            continue
+        sections += wiki_search.split_page(name, redact_text(path.read_text(errors="replace")))
     names: set[str] = set()
     if project:
         p = project.lower()
-        names = {p} | {a.lower() for name, alts in project_aliases().items() if p in name for a in alts}
+        names = {p} | {a.lower() for a in project_aliases().get(p, ())}
     hits = wiki_search.search(sections, query, names)
     rows, paging = page(hits, offset, max(1, min(limit, 20)))
     return {"query": query, "hits": rows, **paging}
 
 
+def _clip(text: str, offset: int) -> dict:
+    """MAX_WIKI_CHARS of `text` from `offset`, with next_offset when more is left."""
+    end = offset + MAX_WIKI_CHARS
+    if end >= len(text):
+        return {"content": text[offset:]}
+    return {"content": text[offset:end] + "\n…[truncated]", "next_offset": end}
+
+
 @tool("wiki")
-def wiki_page(name: Optional[str] = None, sections: Optional[list[str]] = None) -> dict:
+def wiki_page(name: Optional[str] = None, sections: Optional[list[str]] = None, offset: int = 0) -> dict:
     """Read a page from the retra-wiki folder in the Obsidian vault (long-term
     notes on projects, patterns, people, rollups). With no name, returns the
     index plus the list of pages. `name` can be a page title ('retra') or a
     relative path ('projects/retra'). `sections` returns only those H2/H3
     sections (headings as search_wiki gives them, e.g. ['Notes', '2026-11-10']);
-    a page too long to return whole lists its sections."""
+    a page too long to return whole lists its sections. Content longer than
+    12000 characters is cut and carries next_offset: call again with
+    offset=next_offset for the rest."""
     wiki = _wiki_dir().resolve()
     if not wiki.is_dir():
         return {"error": f"wiki folder not found: {wiki}"}
@@ -576,21 +588,16 @@ def wiki_page(name: Optional[str] = None, sections: Optional[list[str]] = None) 
     text = redact_text(path.read_text(errors="replace"))
     if sections:
         found, missing = wiki_search.read_sections(text, sections)
-        for f in found:
-            if len(f["content"]) > MAX_WIKI_CHARS:
-                f["content"] = f["content"][:MAX_WIKI_CHARS] + "\n…[truncated]"
+        found = [{"section": f["section"], **_clip(f["content"], offset)} for f in found]
         out = {"page": match, "sections": found}
         if missing:
             out["missing"] = missing
             out["available"] = [h for _, h, _, _ in wiki_search.headings(text)]
         return out
-    if len(text) <= MAX_WIKI_CHARS:
-        return {"page": match, "content": text}
-    return {
-        "page": match,
-        "content": text[:MAX_WIKI_CHARS] + "\n…[truncated]",
-        "sections": [h for _, h, _, _ in wiki_search.headings(text)],
-    }
+    out = {"page": match, **_clip(text, offset)}
+    if "next_offset" in out:
+        out["sections"] = [h for _, h, _, _ in wiki_search.headings(text)]
+    return out
 
 
 def run():

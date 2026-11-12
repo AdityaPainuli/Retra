@@ -136,6 +136,36 @@ def test_long_page_lists_its_sections(retra, wiki, monkeypatch):
     assert out["sections"] == ["Total Time", "Sessions", "2026-11-10", "2026-11-09", "Notes", "Related"]
     short = call(retra, "wiki_page", name="launch-plan")
     assert "sections" not in short
+    rest = call(retra, "wiki_page", name="retra", offset=out["next_offset"])
+    assert out["next_offset"] == len(OTHER) and rest["content"].startswith(RETRA[len(OTHER):len(OTHER) + 40])
+
+
+def test_long_section_pages_by_offset(retra, wiki, monkeypatch):
+    monkeypatch.setattr(srv, "MAX_WIKI_CHARS", 40)
+    first = call(retra, "wiki_page", name="retra", sections=["Notes"])["sections"][0]
+    assert first["next_offset"] == 40
+    second = call(retra, "wiki_page", name="retra", sections=["Notes"], offset=40)["sections"][0]
+    assert "Monday" in first["content"] + second["content"]
+
+
+def test_repeated_heading_returns_every_occurrence(retra, wiki):
+    (srv._wiki_dir() / "projects" / "retra.md").write_text(RETRA + "\n## Notes\n\n- Second notes block.\n")
+    notes = call(retra, "wiki_page", name="retra", sections=["Notes"])["sections"][0]["content"]
+    assert "Launch moved" in notes and "Second notes block" in notes
+
+
+def test_search_skips_symlinks_outside_the_wiki(retra, wiki, tmp_path):
+    secret = tmp_path / "outside.md"
+    secret.write_text("# Outside\n\n## Notes\n\nzebracorn secret\n")
+    (wiki / "projects" / "leak.md").symlink_to(secret)
+    assert call(retra, "search_wiki", query="zebracorn")["hits"] == []
+
+
+def test_project_alias_matches_the_whole_name(retra, wiki, monkeypatch):
+    from capture import window_tracker
+    monkeypatch.setattr(window_tracker, "project_aliases", lambda: {"myapp": {"retra"}, "retra": {"myapp"}})
+    hits = call(retra, "search_wiki", query="launch checklist", project="app")["hits"]
+    assert hits[0]["page"] == "projects/launch-plan", "'app' is not 'myapp'"
 
 
 def test_compile_prompts_ask_for_confidence_labels():

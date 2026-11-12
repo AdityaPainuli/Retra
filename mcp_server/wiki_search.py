@@ -165,15 +165,21 @@ def search(sections: Iterable[Section], query: str, project_names: set[str] = fr
 
 def read_sections(text: str, wanted: list[str]) -> tuple[list[dict], list[str]]:
     """The named H2/H3 sections of a page, whole (an H2 includes its H3s),
-    matched case-insensitively, plus the names that matched nothing."""
+    matched case-insensitively, plus the names that matched nothing. A heading
+    used more than once returns every occurrence, joined, since search refs
+    them all as one `page#heading`."""
     body = _FRONT_RE.sub("", text, count=1)
     hs = headings(body)
     found, missing = [], []
     for name in wanted:
         key = name.strip().lstrip("#").strip().lower()
-        hit = next((h for h in hs if h[1].lower() == key), None)
-        if hit is None:
-            missing.append(name)
+        hits, end = [], -1
+        for _, heading, start, stop in hs:
+            if heading.lower() == key and start >= end:  # skip one nested in the last
+                hits.append(body[start:stop].strip())
+                end = stop
+        if hits:
+            found.append({"section": next(h[1] for h in hs if h[1].lower() == key), "content": "\n\n".join(hits)})
         else:
-            found.append({"section": hit[1], "content": body[hit[2]:hit[3]].strip()})
+            missing.append(name)
     return found, missing
