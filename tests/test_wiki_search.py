@@ -169,9 +169,10 @@ def test_project_alias_matches_the_whole_name(retra, wiki, monkeypatch):
 
 
 def test_compile_prompts_ask_for_confidence_labels():
-    ingest = wiki_compiler._build_ingest_prompt("schema", "note", "2026-11-10", "", {})
+    page = wiki_compiler._build_page_prompt("schema", "2026-11-10", {"projects/retra.md": RETRA}, "projects/retra.md", [])
+    new_pages = wiki_compiler._build_new_pages_prompt("schema", "2026-11-10", {}, [])
     rollup = wiki_compiler._build_weekly_rollup_prompt("schema", {"2026-11-10": "note"}, {})
-    for prompt in (ingest, rollup):
+    for prompt in (page, new_pages, rollup):
         for label in wiki_search.LABELS:
             assert f"#{label}" in prompt
         assert "## Contested" in prompt

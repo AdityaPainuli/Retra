@@ -162,9 +162,9 @@ python main.py start
 | `python main.py menubar`            | Start menubar app                                       |
 | `python main.py journal`            | Generate today's Obsidian journal                       |
 | `python main.py journal YYYY-MM-DD` | Generate journal for a specific date                    |
-| `python main.py compile`            | Compile today's daily note into wiki                    |
+| `python main.py compile`            | Compile today's activity into wiki                      |
 | `python main.py compile YYYY-MM-DD` | Compile a specific date into wiki                       |
-| `python main.py compile [YYYY-MM-DD] --force` | Recompile even if the note hasn't changed |
+| `python main.py compile [YYYY-MM-DD] --force` | Recompile even if the day's records haven't changed |
 | `python main.py compile-week`       | Generate weekly rollup                                  |
 | `python main.py lint`               | Health check the wiki                                   |
 | `python main.py wiki-diff [date]`   | Show what the last compile (or that day's) changed      |
@@ -242,7 +242,8 @@ retra/
 ├── export/
 │   ├── obsidian.py             # Markdown journal generation (auto-triggers wiki compile)
 │   ├── summarizer.py           # AI summary (Claude/Ollama) + project detection
-│   ├── wiki_compiler.py        # LLM wiki compiler (ingest, rollup, lint, query)
+│   ├── compile_input.py        # The wiki compile's input: a day's records with retra:// refs
+│   ├── wiki_compiler.py        # LLM wiki compiler (per-page ingest jobs, rollup, lint, query)
 │   └── wiki_history.py         # Git history of every wiki compile (data/wiki.git)
 ├── mcp_server/
 │   ├── server.py               # Read-only MCP tools for local agents (stdio)
@@ -331,7 +332,7 @@ Obsidian Vault/
 **How it works:**
 
 1. `python main.py journal` exports the daily note, then auto-triggers wiki compilation
-2. The wiki compiler sends the daily note + schema + the wiki pages the note mentions (by slug or `aliases:`) to Claude; other pages are listed by name only and can't be rewritten. A day whose note hasn't changed since its last successful compile is skipped (`compile --force` to redo it). Prompt size per run is printed and kept in `data/wiki_compiles.json`
+2. The wiki compiler builds its input from the database, not the note: the day's coding sessions, window spans, pages visited, screen text and stats, each tagged with a reference the wiki can cite (`retra://session/<id>`, `retra://span/<date>T<HH:MM>-<HH:MM>?app=<app>`, `retra://url/<id>`, `retra://screen/<id>`, `retra://day/<date>`). Blocked apps, URL patterns and folders never enter the prompt. It plans one job per page the records name (by slug or `aliases:`; a coding session goes to the one page naming its repo or folder) plus one job that may only create pages for unclaimed projects, and makes one Claude call per job with only that page and its records; other pages are listed by name and can't be rewritten. `data/wiki_manifest.json` keeps each page's hash and the fingerprint of the records it was built from, so an unchanged day makes no call and an unchanged page is skipped (`compile --force` redoes them). `data/wiki_run.json` holds the job queue of a run in progress: a killed or failed compile resumes with the jobs not done yet. Prompt size per job is printed, and per day kept in the manifest
 3. Claude updates project pages, pattern tracking, learning logs, and people pages, tagging each new fact with a confidence label (`#confirmed`, `#source-backed`, `#watchlist`, `#saved-context`, or `#contested`, which keeps both sides under `## Contested`)
 4. On Sundays, a weekly rollup is auto-generated
 5. `python main.py install` schedules the full pipeline (journal + compile) daily at 23:00
