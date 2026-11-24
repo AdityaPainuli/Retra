@@ -63,18 +63,19 @@ def pick_pages(wiki_dir: Path, n: int) -> list[str]:
     return [p.relative_to(wiki_dir).as_posix() for p in pages[:n]]
 
 
-def _json_list(text: Optional[str]) -> list:
-    """The first JSON array in a model reply ([] when there is none)."""
+def _json_list(text: Optional[str]) -> Optional[list]:
+    """The first JSON array in a model reply, or None when the call failed
+    or the reply has none (unlike a valid `[]`)."""
     if not text:
-        return []
+        return None
     start, end = text.find("["), text.rfind("]")
     if start < 0 or end <= start:
-        return []
+        return None
     try:
         out = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        return []
-    return out if isinstance(out, list) else []
+        return None
+    return out if isinstance(out, list) else None
 
 
 def extract_prompt(page: str, text: str, today: date, limit: int) -> str:
@@ -122,15 +123,52 @@ Give each claim one verdict:
 Reply with only a JSON array: [{{"i": 0, "verdict": "supported", "reason": "one short sentence"}}]"""
 
 
+def _day_sessions(d: date) -> list:
+    """Coding sessions as they were on `d`: only that day's turns, outcome
+    first (last recap, last reply, then prompts), so cutting a long record
+    keeps what happened. A session runs for weeks, and its latest state
+    would judge an old claim against a later decision."""
+    from datetime import datetime as dt, time
+
+    from export.compile_input import Record
+    from mcp_server.store import get_db, redact_text, session_is_private, short
+
+    start = dt.combine(d, time.min)
+    end = start + timedelta(days=1)
+    db = get_db()
+    out = []
+    for s in db.get_agent_sessions(start, end, 200):
+        if session_is_private(s):
+            continue
+        turns = db.get_agent_turns(s["session_id"], start, end)
+        if not turns:
+            continue
+        last = {k: next((t for t in reversed(turns) if t["kind"] == k), None) for k in ("recap", "reply")}
+        prompts = [short(t["text"], 120) for t in turns if t["kind"] == "prompt"][-3:]
+        where = s["project"] + (f", repo {s['repo']}" if s.get("repo") else "")
+        parts = [f'Claude Code session "{s["title"]}" ({where}), {turns[0]["timestamp"][11:16]} to '
+                 f'{turns[-1]["timestamp"][11:16]}']
+        if last["recap"]:
+            parts.append(f"where it stood {last['recap']['timestamp'][11:16]}: {short(last['recap']['text'], 300)}")
+        if last["reply"]:
+            parts.append(f"last reply: {short(last['reply']['text'], 300)}")
+        if prompts:
+            parts.append("asked: " + " | ".join(prompts))
+        names = [n.lower() for n in (s.get("repo"), s["project"]) if n]
+        out.append(Record(f"retra://session/{s['session_id']}", "session", redact_text(". ".join(parts)), names))
+    return out
+
+
 def _with_reflection(d: date) -> list:
-    """A day's records plus its AI reflection, which the daily note (and so
-    the older wiki pages) were written from."""
+    """A day's records, with coding sessions as they were that day, plus its
+    AI reflection, which the daily note (and so the older wiki pages) were
+    written from."""
     import sqlite3
 
     from export.compile_input import Record, day_records
     from mcp_server.store import db_path, redact_text
 
-    recs = day_records(d)
+    recs = [r for r in day_records(d) if r.kind != "session"] + _day_sessions(d)
     try:
         conn = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
         row = conn.execute("SELECT ai_summary FROM daily_summaries WHERE date = ?", (d.isoformat(),)).fetchone()
@@ -138,16 +176,59 @@ def _with_reflection(d: date) -> list:
     except sqlite3.Error:
         row = None
     if row and row[0]:
-        text = redact_text(" ".join(row[0].split()))[:MAX_REFLECTION_CHARS]
+        # Redact line by line first: a blocked line drops only itself.
+        text = " ".join((redact_text(row[0]) or "").split())[:MAX_REFLECTION_CHARS]
         recs.append(Record(f"retra://day/{d.isoformat()}", "reflection", f"AI reflection for {d.isoformat()}: {text}"))
     return recs
 
 
-class Records:
-    """A day's records (with its reflection), loaded once per run."""
+def _db_active_days(names: set[str], today: date, n: int) -> list[date]:
+    """The latest days up to `today` with activity or coding turns
+    attributed to any of `names`, however long ago."""
+    import sqlite3
 
-    def __init__(self, loader=None):
+    from mcp_server.store import db_path
+
+    if not names:
+        return []
+    marks = ", ".join("?" * len(names))
+    end = (today + timedelta(days=1)).isoformat()
+    try:
+        conn = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
+        rows = conn.execute(f"""
+            SELECT day FROM (
+                SELECT date(timestamp) AS day FROM window_events
+                WHERE lower(project_hint) IN ({marks}) AND timestamp < ?
+                UNION
+                SELECT date(m.timestamp) FROM agent_messages m JOIN agent_sessions s USING (session_id)
+                WHERE (lower(s.project) IN ({marks}) OR lower(coalesce(s.repo, '')) IN ({marks})) AND m.timestamp < ?
+            ) ORDER BY day DESC LIMIT ?""", (*names, end, *names, *names, end, n)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    return [date.fromisoformat(r[0]) for r in rows if r[0]]
+
+
+class Records:
+    """A day's records (with its reflection), loaded once per run. The
+    subject's latest active days come from the database; with a custom
+    loader (tests) they're found by scanning the last RECENT_DAYS."""
+
+    def __init__(self, loader=None, active_days=None):
         self._load, self._days = loader or _with_reflection, {}
+        self._active = active_days or (_db_active_days if loader is None else None)
+
+    def latest_active(self, names: set[str], today: date, about) -> list[date]:
+        if self._active:
+            return self._active(names, today, RECENT_ACTIVE)
+        found = []
+        for back in range(RECENT_DAYS + 1):
+            d = today - timedelta(days=back)
+            if any(about(r) for r in self.day(d) if r.kind != "day"):
+                found.append(d)
+            if len(found) == RECENT_ACTIVE:
+                break
+        return found
 
     def day(self, d: date) -> list:
         if d not in self._days:
@@ -182,14 +263,7 @@ def gather_evidence(claims: list[dict], names: set[str], records: Records, today
                 days.add(date.fromisoformat(d))
             except ValueError:
                 pass
-    active = []
-    for back in range(RECENT_DAYS + 1):
-        d = today - timedelta(days=back)
-        if any(relevant(r) >= 3 for r in records.day(d) if r.kind != "day"):
-            active.append(d)
-        if len(active) == RECENT_ACTIVE:
-            break
-    days |= set(active)
+    days |= set(records.latest_active(names, today, lambda r: relevant(r) >= 3))
 
     def line(rec) -> str:
         text = rec.line()
@@ -233,14 +307,19 @@ def eval_page(page: str, text: str, llm: Llm, records: Records, today: date, lim
     from export.wiki_compiler import _page_names
 
     raw = _json_list(llm(extract_prompt(page, text, today, limit)))
+    if raw is None:
+        return {"page": page, "claims": [], "dropped_quotes": 0, "error": "claim extraction failed"}
     claims, dropped = _clean_claims(raw, text, limit)
     out = {"page": page, "claims": claims, "dropped_quotes": dropped}
     if not claims:
         return out
     evidence = gather_evidence(claims, _page_names(page, text), records, today)
     out["evidence_chars"] = len(evidence)
+    judged = _json_list(llm(judge_prompt(page, claims, evidence, today)))
+    if judged is None:
+        return {**out, "error": "judging failed"}
     verdicts = {}
-    for v in _json_list(llm(judge_prompt(page, claims, evidence, today))):
+    for v in judged:
         if isinstance(v, dict) and isinstance(v.get("i"), int) and v.get("verdict") in VERDICTS:
             verdicts[v["i"]] = v
     for i, c in enumerate(claims):
@@ -251,12 +330,17 @@ def eval_page(page: str, text: str, llm: Llm, records: Records, today: date, lim
 
 
 def summarize(pages: list[dict]) -> dict:
+    """Rates over the pages that were judged. A page whose model call failed
+    is counted in `failed_pages`, not as a page without claims."""
+    failed = [p["page"] for p in pages if p.get("error")]
+    pages = [p for p in pages if not p.get("error")]
     claims = [c for p in pages for c in p["claims"]]
     counts = Counter(c["verdict"] for c in claims)
     current = [c for c in claims if c["current"]]
     n = len(claims)
     return {
         "pages": len(pages),
+        "failed_pages": failed,
         "claims": n,
         "dropped_quotes": sum(p["dropped_quotes"] for p in pages),
         "counts": {v: counts.get(v, 0) for v in VERDICTS},
@@ -286,8 +370,12 @@ def run(pages: int = 15, claims_per_page: int = 8, today: Optional[date] = None,
         print(f"[Retra] wiki-eval: {page}")
         results.append(eval_page(page, text, llm, records, today, claims_per_page))
 
+    summary = summarize(results)
+    if results and not summary["pages"]:
+        # Nothing was judged (API down, no credit): a report would read as an empty wiki.
+        raise RuntimeError(f"every page failed ({results[0]['error']}); no report saved")
     report = {"kind": "wiki", "date": today.isoformat(), "at": datetime.now().isoformat(timespec="seconds"),
-              "summary": summarize(results), "pages": results}
+              "summary": summary, "pages": results}
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"wiki-{today.isoformat()}.json"
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
@@ -297,7 +385,9 @@ def run(pages: int = 15, claims_per_page: int = 8, today: Optional[date] = None,
 def table(report: dict, baseline: Optional[dict] = None) -> str:
     s = report["summary"]
     b = (baseline or {}).get("summary")
-    rows = [("claims", s["claims"], b and b["claims"])]
+    rows = [("pages judged", s["pages"], b and b["pages"]),
+            ("pages failed", len(s.get("failed_pages", [])), b and len(b.get("failed_pages", []))),
+            ("claims", s["claims"], b and b["claims"])]
     rows += [(v, f"{s['counts'][v]} ({s['rates'][v]:.0%})", b and f"{b['counts'][v]} ({b['rates'][v]:.0%})")
              for v in VERDICTS]
     rows += [("score (supported / current)", f"{s['score']:.0%}", b and f"{b['score']:.0%}"),

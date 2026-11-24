@@ -268,8 +268,14 @@ def _flag(args: tuple, name: str, default: str) -> str:
 
 def cmd_wiki_eval(*args: str):
     from evals import wiki_eval
-    report, path = wiki_eval.run(pages=int(_flag(args, "--pages", "15")))
+    try:
+        report, path = wiki_eval.run(pages=int(_flag(args, "--pages", "15")))
+    except RuntimeError as e:
+        print(f"[Retra] wiki-eval failed: {e}")
+        sys.exit(1)
     print(wiki_eval.table(report, wiki_eval.previous_report("wiki", report["date"])))
+    if failed := report["summary"]["failed_pages"]:
+        print(f"[Retra] {len(failed)} page(s) failed and are left out of the rates: {', '.join(failed)}")
     print(f"[Retra] Saved {path}")
 
 

@@ -3,7 +3,7 @@ Does Retra make an agent answer better? (roadmap D4)
 
 `python main.py agent-eval` asks Claude Code (`claude -p`) each scenario in
 data/evals/scenarios.json twice: once with only Retra's MCP server and once
-with no MCP server. Both arms get the same read-only tools and start in the
+with no MCP server. Both arms get only Read, Glob and Grep and start in the
 home folder, so the only difference is Retra. A judge scores each answer
 0 to 2 against the scenario's gold answer. The report (score, tokens, cost,
 time and Retra calls per arm) is saved under data/evals/.
@@ -25,8 +25,11 @@ from evals.wiki_eval import EVAL_DIR
 
 SCENARIOS_PATH = EVAL_DIR / "scenarios.json"
 ARMS = ("retra", "none")
-# Read-only tools both arms get, so the agent can still look around.
-BASE_TOOLS = ["Read", "Glob", "Grep", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)"]
+# The only built-in tools either arm has, so the agent can look around but
+# never change a file. No Bash: even `git log --output=<file>` writes.
+BASE_TOOLS = ["Read", "Glob", "Grep"]
+# Turned off by name too, in case a user setting would allow them.
+DENIED_TOOLS = ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]
 RUN_TIMEOUT = 600
 TEMPLATE = [
     {"id": "left-off", "question": "Where did I leave off on <project> as of <YYYY-MM-DD>?", "gold": ""},
@@ -54,19 +57,19 @@ def load_scenarios(path: Path = SCENARIOS_PATH) -> list[dict]:
 def mcp_config(arm: str, usage_path: Path) -> dict:
     if arm == "none":
         return {"mcpServers": {}}
-    python = PROJECT_ROOT / "venv" / "bin" / "python"
-    return {"mcpServers": {"retra": {
-        "type": "stdio", "command": str(python), "args": [str(PROJECT_ROOT / "main.py"), "mcp"],
-        # Eval calls go to their own log, so they don't count as real use.
-        "env": {"RETRA_USAGE_PATH": str(usage_path)},
-    }}}
+    from mcp_server.install import server_entry
+    # The same entry `install claude` writes (with its interpreter fallback).
+    # Eval calls go to their own log, so they don't count as real use.
+    entry = server_entry("claude", PROJECT_ROOT)
+    return {"mcpServers": {"retra": {**entry, "env": {**entry.get("env", {}), "RETRA_USAGE_PATH": str(usage_path)}}}}
 
 
 def claude_command(question: str, config_path: Path, arm: str, model: str) -> list[str]:
-    tools = BASE_TOOLS + (["mcp__retra"] if arm == "retra" else [])
+    allowed = BASE_TOOLS + (["mcp__retra"] if arm == "retra" else [])
     return ["claude", "-p", question, "--output-format", "json", "--model", model,
             "--strict-mcp-config", "--mcp-config", str(config_path),
-            "--allowedTools", *tools, "--no-session-persistence"]
+            "--tools", ",".join(BASE_TOOLS), "--disallowedTools", *DENIED_TOOLS,
+            "--allowedTools", *allowed, "--no-session-persistence"]
 
 
 def run_claude(question: str, arm: str, workdir: Path, model: str = "sonnet") -> dict:

@@ -3,6 +3,8 @@ against that day's records and the subject's latest activity; agent-eval
 runs each scenario with and without Retra and scores both (roadmap D4)."""
 
 import json
+
+import pytest
 from datetime import date
 
 from evals import agent_eval, wiki_eval
@@ -73,9 +75,38 @@ def test_eval_page_drops_invented_quotes_and_judges_the_rest():
 def test_missing_verdict_counts_as_unverified():
     extracted = json.dumps([{"claim": "Launch is on Monday", "quote": "Launch moved to Monday.",
                              "dates": [], "current": True}])
-    out = wiki_eval.eval_page("projects/retra.md", PAGE, fake_llm([extracted, "no json"]),
+    out = wiki_eval.eval_page("projects/retra.md", PAGE, fake_llm([extracted, "[]"]),
                               wiki_eval.Records(records), TODAY, 8)
-    assert out["claims"][0]["verdict"] == "unverified"
+    assert out["claims"][0]["verdict"] == "unverified" and "error" not in out
+
+
+@pytest.mark.parametrize("replies, error", [([None], "claim extraction failed"),
+                                            (["not json"], "claim extraction failed"),
+                                            (['[{"claim": "Launch is on Monday", "quote": "Launch moved to Monday.",'
+                                              ' "dates": [], "current": true}]', None], "judging failed")])
+def test_failed_calls_are_reported_not_scored(replies, error):
+    out = wiki_eval.eval_page("projects/retra.md", PAGE, fake_llm(list(replies)), wiki_eval.Records(records), TODAY, 8)
+    assert out["error"] == error
+    s = wiki_eval.summarize([out])
+    assert s["pages"] == 0 and s["failed_pages"] == ["projects/retra.md"] and s["claims"] == 0
+
+
+def test_no_report_when_every_page_failed(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "projects").mkdir(parents=True)
+    (wiki / "projects" / "retra.md").write_text(PAGE)
+    with pytest.raises(RuntimeError, match="no report saved"):
+        wiki_eval.run(pages=5, today=TODAY, llm=lambda p: None, records=wiki_eval.Records(records),
+                      wiki_dir=wiki, out_dir=tmp_path / "evals")
+    assert not (tmp_path / "evals").exists()
+
+
+def test_latest_active_days_come_from_any_time(monkeypatch):
+    calls = []
+    recs = wiki_eval.Records(records, active_days=lambda names, today, n: calls.append(names) or [date(2026, 10, 1)])
+    claims = [{"claim": "launch", "dates": [], "current": True}]
+    evidence = wiki_eval.gather_evidence(claims, {"retra"}, recs, TODAY)
+    assert "--- 2026-10-01 ---" in evidence and calls == [{"retra"}]
 
 
 def test_summary_and_saved_report(tmp_path):
@@ -168,3 +199,46 @@ def test_repeats_run_each_scenario_several_times(tmp_path):
                                out_dir=tmp_path, today=TODAY, repeats=3)
     assert calls == ["retra", "none"] * 3 and [r["run"] for r in report["runs"]] == [1, 1, 2, 2, 3, 3]
     assert report["summary"]["retra"]["words"] == 3
+
+
+def test_session_evidence_is_the_days_turns_only(retra):
+    import os
+    from datetime import timedelta
+    from storage.database import Database
+
+    db = Database(os.environ["RETRA_DB_PATH"])
+    d = date.today() - timedelta(days=3)
+    later = d + timedelta(days=2)
+    db.save_agent_session({
+        "session_id": "long", "source": "claude-code", "cwd": "/work/retra", "project": "retra", "repo": None,
+        "branch": "main", "title": "Launch", "started_at": f"{d}T10:00:00", "ended_at": f"{later}T10:00:00",
+        "prompt_count": 2, "files": "[]", "prs": "[]", "last_status": "Launch moved to Monday.",
+        "last_reply": None, "log_path": "/l.jsonl", "log_size": 1, "log_mtime": 1.0,
+    }, [(f"{d}T10:00:00", "prompt", "plan the launch"), (f"{d}T10:05:00", "recap", "Launch set for Friday."),
+        (f"{later}T10:00:00", "recap", "Launch moved to Monday.")])
+    [rec] = [r for r in wiki_eval._day_sessions(d) if r.ref == "retra://session/long"]
+    assert "Launch set for Friday" in rec.text and "Monday" not in rec.text
+    assert rec.text.index("where it stood") < rec.text.index("asked:"), "outcome before prompts"
+    assert all(r.ref != "retra://session/long" for r in wiki_eval._day_sessions(d + timedelta(days=1)))
+
+
+def test_one_blocked_line_drops_only_that_line_of_the_reflection(retra):
+    import os
+    import sqlite3
+
+    d = date.today()
+    conn = sqlite3.connect(os.environ["RETRA_DB_PATH"])
+    conn.execute("INSERT OR REPLACE INTO daily_summaries (date, ai_summary) VALUES (?, ?)",
+                 (d.isoformat(), "Shipped the evals.\nPaid the bank bill.\nPlanned D5."))
+    conn.commit()
+    conn.close()
+    [refl] = [r for r in wiki_eval._with_reflection(d) if r.kind == "reflection"]
+    assert "Shipped the evals." in refl.text and "Planned D5." in refl.text and "bank" not in refl.text
+
+
+def test_agent_runs_have_only_read_only_tools(tmp_path):
+    cmd = agent_eval.claude_command("q", tmp_path / "c.json", "retra", "sonnet")
+    assert cmd[cmd.index("--tools") + 1] == "Read,Glob,Grep"
+    denied = cmd[cmd.index("--disallowedTools") + 1:cmd.index("--allowedTools")]
+    assert {"Bash", "Edit", "Write"} <= set(denied)
+    assert not any(t.startswith("Bash") for t in cmd[cmd.index("--allowedTools") + 1:])
