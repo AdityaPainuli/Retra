@@ -726,12 +726,14 @@ OUTPUT FORMAT for file updates:
 ===END_FILE==="""
 
 
-def _call_claude(prompt: str) -> Optional[str]:
+def _call_claude(prompt: str, record_errors: bool = True) -> Optional[str]:
     """Call Claude API via streaming and return the assembled response text.
 
     Streaming keeps the socket active during long generations so the read
-    timeout doesn't fire mid-response.
+    timeout doesn't fire mid-response. `record_errors=False` keeps failures
+    out of the wiki's pipeline status (for evals).
     """
+    note_error = pipeline_status.note_error if record_errors else (lambda msg: None)
     settings = get_settings()
 
     api_key = settings.ai.claude_api_key
@@ -740,7 +742,7 @@ def _call_claude(prompt: str) -> Optional[str]:
 
     if not api_key:
         print("[Retra] ANTHROPIC_API_KEY not set")
-        pipeline_status.note_error("ANTHROPIC_API_KEY not set")
+        note_error("ANTHROPIC_API_KEY not set")
         return None
 
     payload = json.dumps({
@@ -805,13 +807,13 @@ def _call_claude(prompt: str) -> Optional[str]:
         text, stop_reason = call_with_retries(attempt, "Wiki compile")
     except Exception as e:
         print(f"[Retra] Claude API error: {e}")
-        pipeline_status.note_error(f"Claude API: {e}")
+        note_error(f"Claude API: {e}")
         return None
 
     if stop_reason not in ("end_turn", "stop_sequence"):
         # A cut-off or interrupted stream would write half-finished wiki pages.
         print(f"[Retra] Claude response unusable (stop_reason={stop_reason})")
-        pipeline_status.note_error(f"Claude API: stop_reason={stop_reason}")
+        note_error(f"Claude API: stop_reason={stop_reason}")
         return None
 
     return text or None

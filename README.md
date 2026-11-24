@@ -172,6 +172,8 @@ python main.py start
 | `python main.py backfill`           | Compile all existing daily notes into wiki              |
 | `python main.py mcp`                | Run the read-only MCP server (stdio) for local agents   |
 | `python main.py mcp-usage`          | Show how often agents called the MCP server, per week   |
+| `python main.py wiki-eval [--pages N]` | Check sampled wiki claims against the raw records    |
+| `python main.py agent-eval [--model M] [--runs N]` | Score an agent's answers with and without Retra |
 | `python main.py install`            | Install as macOS Launch Agents (auto-start on login)    |
 | `python main.py uninstall`          | Remove Launch Agents                                    |
 | `python main.py install <agent>`    | Add Retra's MCP server and skill to `claude`, `codex` or `cursor` |
@@ -415,6 +417,13 @@ For Claude desktop, add this to `~/Library/Application Support/Claude/claude_des
 ```
 
 Use absolute paths to the venv's Python so the client doesn't need your shell environment. Then ask things like "what am I working on?" or "when did I last touch the bifrost PRs?".
+
+### Evals
+
+Two commands measure whether the wiki is right and whether Retra helps an agent. Both call the Claude API, save a report to `data/evals/`, and print a table next to the previous report.
+
+- `python main.py wiki-eval` takes the 15 most recently changed wiki pages (`--pages N`), has Claude list up to 8 checkable claims per page, and keeps only those whose quote is on the page word for word. Each claim is judged against the raw records of the days it names plus the subject's two latest active days: `supported`, `stale` (true once, contradicted by newer records), `invented` (contradicted by the records of its own time) or `unverified`. The score is the supported share of claims the page states as current; forgetting counts stale claims still stated as current.
+- `python main.py agent-eval` asks Claude Code (`claude -p`) each question in `data/evals/scenarios.json` twice, once with only Retra's MCP server and once with no MCP server, with the same read-only tools in your home folder. A judge scores each answer 0 to 2 against your gold answer; `--runs N` asks each question N times per arm, since one answer can flip. It reports score, answer length, tokens, cost and time per run, and Retra calls per run (logged to a separate file, so evals don't show up in `mcp-usage`). The first run writes a template: give each question real dates so its gold answer stays true.
 
 ## Privacy
 

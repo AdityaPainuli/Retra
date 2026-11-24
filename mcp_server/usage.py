@@ -8,6 +8,7 @@ and is kept out of the database, which the MCP server only opens read-only.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
@@ -17,7 +18,9 @@ from capture.screen_text import redact
 from config.settings import DATA_DIR
 from mcp_server.store import PRIVATE, redact_text
 
-USAGE_PATH = DATA_DIR / "mcp_usage.jsonl"
+# RETRA_USAGE_PATH points evals at their own log, so eval runs don't count
+# as real use.
+USAGE_PATH = Path(os.environ.get("RETRA_USAGE_PATH") or DATA_DIR / "mcp_usage.jsonl")
 MAX_ARG_CHARS = 200
 _URL_TAIL_RE = re.compile(r"(\S)[?#]\S+")
 

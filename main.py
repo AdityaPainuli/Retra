@@ -23,6 +23,8 @@ Usage:
     python main.py backfill    Compile all existing daily notes into wiki
     python main.py mcp         Run the read-only MCP server (stdio) for local agents
     python main.py mcp-usage   Show how often agents called the MCP server, per week
+    python main.py wiki-eval [--pages N]  Check sampled wiki claims against the raw records
+    python main.py agent-eval [--model M] [--runs N]  Score an agent's answers with and without Retra
     python main.py install     Install as macOS Launch Agent (auto-start on login)
     python main.py uninstall   Remove Launch Agent
     python main.py install <agent>    Add Retra's MCP server and skill to claude, codex or cursor
@@ -260,6 +262,28 @@ def cmd_mcp_usage():
     print(weekly_report())
 
 
+def _flag(args: tuple, name: str, default: str) -> str:
+    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
+
+
+def cmd_wiki_eval(*args: str):
+    from evals import wiki_eval
+    report, path = wiki_eval.run(pages=int(_flag(args, "--pages", "15")))
+    print(wiki_eval.table(report, wiki_eval.previous_report("wiki", report["date"])))
+    print(f"[Retra] Saved {path}")
+
+
+def cmd_agent_eval(*args: str):
+    from evals import agent_eval, wiki_eval
+    report, path = agent_eval.run(model=_flag(args, "--model", "sonnet"), repeats=int(_flag(args, "--runs", "1")))
+    if report is None:
+        print(f"[Retra] Write the questions and gold answers in {agent_eval.SCENARIOS_PATH} first "
+              f"(a template is there), using real dates instead of placeholders.")
+        sys.exit(1)
+    print(agent_eval.table(report, wiki_eval.previous_report("agent", report["date"])))
+    print(f"[Retra] Saved {path}")
+
+
 def cmd_status():
     from capture.health import get_health
     from storage.database import Database
@@ -482,6 +506,8 @@ COMMANDS = {
     "backfill": cmd_backfill,
     "mcp": cmd_mcp,
     "mcp-usage": cmd_mcp_usage,
+    "wiki-eval": cmd_wiki_eval,
+    "agent-eval": cmd_agent_eval,
     "install": cmd_install,
     "uninstall": cmd_uninstall,
 }
@@ -500,8 +526,8 @@ def main():
         sys.exit(1)
 
     # Pass extra args to commands that accept them
-    if command == "compile":
-        cmd_compile(*sys.argv[2:])
+    if command in ("compile", "wiki-eval", "agent-eval"):
+        COMMANDS[command](*sys.argv[2:])
     elif command in ("journal", "wiki-diff") and len(sys.argv) > 2:
         COMMANDS[command](sys.argv[2])
     elif command == "install" and len(sys.argv) > 2:
