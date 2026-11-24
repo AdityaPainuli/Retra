@@ -307,6 +307,38 @@ class Database:
             cols = {row["name"] for row in conn.execute("PRAGMA table_info(agent_sessions)")}
             if "repo" not in cols:
                 conn.execute("ALTER TABLE agent_sessions ADD COLUMN repo TEXT")
+            # Which parser read the log (capture/claude_sessions.PARSE_VERSION),
+            # so a parser that keeps more re-reads old logs once.
+            if "parse_version" not in cols:
+                conn.execute("ALTER TABLE agent_sessions ADD COLUMN parse_version INTEGER")
+
+            # Git commits (capture/git_commits.py): what shipped and why. A
+            # squash-merged PR's commit body is the PR description.
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS git_commits (
+                    repo_path TEXT NOT NULL,
+                    sha TEXT NOT NULL,
+                    project TEXT,
+                    repo TEXT,
+                    committed_at TEXT NOT NULL,
+                    authored_at TEXT,
+                    author TEXT,
+                    subject TEXT NOT NULL,
+                    body TEXT,
+                    PRIMARY KEY (repo_path, sha)
+                );
+                CREATE INDEX IF NOT EXISTS idx_git_commits_committed ON git_commits(committed_at);
+                CREATE VIRTUAL TABLE IF NOT EXISTS git_commits_fts USING fts5(
+                    subject, body, content='git_commits', content_rowid='rowid'
+                );
+                CREATE TRIGGER IF NOT EXISTS git_commits_fts_ai AFTER INSERT ON git_commits BEGIN
+                    INSERT INTO git_commits_fts(rowid, subject, body) VALUES (new.rowid, new.subject, new.body);
+                END;
+                CREATE TRIGGER IF NOT EXISTS git_commits_fts_ad AFTER DELETE ON git_commits BEGIN
+                    INSERT INTO git_commits_fts(git_commits_fts, rowid, subject, body)
+                    VALUES ('delete', old.rowid, old.subject, old.body);
+                END;
+            """)
 
             # Wiki claims (export/claims.py): one row per statement a wiki page
             # makes, with the retra:// records it cites. Never edited in place:
@@ -694,11 +726,11 @@ class Database:
 
     # ── Agent Sessions ────────────────────────────────────────────
 
-    def get_agent_log_state(self) -> dict[str, tuple[int, float]]:
-        """{log_path: (size, mtime)} of every synced session log."""
+    def get_agent_log_state(self) -> dict[str, tuple[int, float, Optional[int]]]:
+        """{log_path: (size, mtime, parse_version)} of every synced session log."""
         with self._conn() as conn:
-            rows = conn.execute("SELECT log_path, log_size, log_mtime FROM agent_sessions").fetchall()
-        return {r["log_path"]: (r["log_size"], r["log_mtime"]) for r in rows}
+            rows = conn.execute("SELECT log_path, log_size, log_mtime, parse_version FROM agent_sessions").fetchall()
+        return {r["log_path"]: (r["log_size"], r["log_mtime"], r["parse_version"]) for r in rows}
 
     def get_agent_session_folders(self) -> list[tuple[str, Optional[str], Optional[str]]]:
         """Distinct (cwd, project, repo) of stored sessions."""
@@ -723,6 +755,28 @@ class Database:
                 "INSERT INTO agent_messages (session_id, timestamp, kind, text) VALUES (?, ?, ?, ?)",
                 [(session["session_id"], *m) for m in messages],
             )
+
+    # ── Git commits ───────────────────────────────────────────────
+
+    def get_commit_sync_state(self) -> dict[str, str]:
+        """{repo_path: newest committed_at stored}."""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT repo_path, MAX(committed_at) FROM git_commits GROUP BY repo_path").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def save_commits(self, commits: list[dict]) -> int:
+        """Insert commits not stored yet. Returns how many were new."""
+        if not commits:
+            return 0
+        cols = list(commits[0])
+        with self._conn() as conn:
+            count = "SELECT COUNT(*) FROM git_commits"
+            before = conn.execute(count).fetchone()[0]
+            conn.executemany(
+                f"INSERT OR IGNORE INTO git_commits ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                [tuple(c[k] for k in cols) for c in commits],
+            )
+            return conn.execute(count).fetchone()[0] - before
 
     # ── Daily Summaries ───────────────────────────────────────────
 

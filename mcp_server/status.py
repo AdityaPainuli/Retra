@@ -25,7 +25,7 @@ HEARTBEAT_STALE_SEC = 45
 # Compiles run nightly at 23:00, so >36h without a success means a missed night.
 COMPILE_STALE_HOURS = 36
 
-RAW_SOURCES = ("activity", "screen_text", "coding_sessions")
+RAW_SOURCES = ("activity", "screen_text", "coding_sessions", "commits")
 # Nightly pipeline stages, each with the name used in warnings. ai_summary can
 # fail while the journal and wiki succeed, leaving day_summary without a reflection.
 COMPILED_SOURCES = {"journal": "daily journal", "ai_summary": "AI reflection", "wiki": "wiki"}
@@ -35,6 +35,7 @@ _LATEST_SQL = {
     "screen_text": "SELECT timestamp FROM screenshots WHERE ocr_text IS NOT NULL AND ocr_text != '' "
                    "ORDER BY timestamp DESC LIMIT 1",
     "coding_sessions": "SELECT MAX(ended_at) FROM agent_sessions",
+    "commits": "SELECT MAX(committed_at) FROM git_commits",
 }
 
 

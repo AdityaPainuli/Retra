@@ -365,11 +365,12 @@ Or use the **Wiki** page in the dashboard to browse, search, and ask questions i
 | `get_status()` | Whether capture is recording, when each source was last captured, the last journal, AI reflection and wiki compile, and stale-data warnings |
 | `current_activity(minutes_back=30)` | What's active right now, plus the last N minutes by project, app, and window |
 | `recent_work(days=1, project=None)` | Time per project and category, top windows and URLs, active hours (up to 30 days) |
-| `day_summary(day="today")` | Focus stats, projects, a timeline, and the AI reflection (with when it was written) for one day |
+| `day_summary(day="today")` | Focus stats, projects, a timeline, the Claude Code sessions worked on that day (with where each stood at the day's end), that day's commits, and the AI reflection (with when it was written) for one day |
 | `search_activity(query, since, until, limit=20, offset=0)` | When something was worked on: full-text search over window titles, URLs, and page titles, best match first |
 | `search_screen_text(query, since, until, limit=15, offset=0)` | What was on screen: full-text search over text read from screenshots, with snippets |
-| `coding_sessions(project=None, days=7, limit=5, offset=0)` | Recent Claude Code sessions: where each stopped, last prompts, files edited, PRs opened |
-| `search_coding_sessions(query, since, until, limit=15, offset=0)` | Find past Claude Code sessions by what was asked or how a turn ended |
+| `coding_sessions(project=None, days=7, limit=5, offset=0, as_of=None)` | Recent Claude Code sessions: where each stopped, last prompts, files edited, PRs opened. With `as_of`, each session as it stood at that moment |
+| `search_coding_sessions(query, since, until, limit=15, offset=0)` | Find past Claude Code sessions by what was asked, how a turn ended, or what the assistant answered |
+| `commits(query=None, project=None, since, until, limit=15, offset=0)` | Git commits from local repos: what shipped and why, with PR numbers and squash-merged PR descriptions |
 | `list_projects(days=14)` | Detected projects with minutes, active days, and last-seen time |
 | `search_wiki(query, project=None, limit=5, offset=0)` | Where something is in the wiki: `page#section` refs with excerpts and confidence labels, built fresh from the files on each call |
 | `wiki_page(name=None, sections=None, offset=0)` | A page from `retra-wiki/` in the vault (index when no name is given), or just the named sections. Long content pages by `next_offset` |
@@ -423,7 +424,8 @@ Use absolute paths to the venv's Python so the client doesn't need your shell en
 - **Screenshots stay narrow and short-lived** — Only the active window, never private apps or password fields, text read on-device with secrets masked, image deleted after 2 days
 - **Blocklist** — Exclude sensitive apps and URLs from tracking
 - **`.env` for secrets** — API keys stored in `.env`, never committed
-- **Claude Code sessions** — Only your prompts, turn recaps, the last reply, file paths and PR links are kept (not tool output or file contents), with secrets masked. Turn it off with `sources.claude_code = false`
+- **Claude Code sessions** — Only your prompts, turn recaps, each turn's final reply, file paths and PR links are kept (not tool output or file contents), with secrets masked. Turn it off with `sources.claude_code = false`
+- **Git commits** — The time, author, subject and message of commits in the repos your sessions ran in and in your usual dev folders, read locally with `git log` (no code, no diffs), with secrets masked. Turn it off with `sources.git_commits = false`
 - **Data retention** — Screenshot images auto-delete after 2 days; activity events, screen text and coding sessions are kept forever unless you set `event_retention_days`
 - **Open source** — Audit every line of code
 

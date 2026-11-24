@@ -33,7 +33,7 @@ def test_results_carry_freshness(retra):
     assert f == {"activity_until": (retra.now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")}
 
     f = _call(retra, "day_summary")["freshness"]
-    assert set(f) == {"activity_until", "ai_summary_compiled_at"}
+    assert set(f) == {"activity_until", "ai_summary_compiled_at", "coding_sessions_until", "commits_until"}
 
     f = _call(retra, "wiki_page", {"name": "retra"})["freshness"]
     assert f == {"wiki_compiled_at": (retra.now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")}
@@ -87,6 +87,6 @@ def test_status_works_before_the_database_exists(retra, monkeypatch, tmp_path):
 
     s = _call(retra, "get_status")
     assert "error" not in s
-    assert s["latest"] == {"activity": None, "screen_text": None, "coding_sessions": None}
+    assert s["latest"] == {"activity": None, "screen_text": None, "coding_sessions": None, "commits": None}
     assert s["capture"]["recording"] is True and s["pipeline"]["wiki"]["ok"] is True
     assert s["db_size_mb"] is None

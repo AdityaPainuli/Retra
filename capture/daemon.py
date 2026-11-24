@@ -30,6 +30,7 @@ from capture.window_tracker import (
 from capture.screenshot import ScreenshotCapture, purge_old_images
 from capture.screen_text import ocr_screenshot, process_backlog
 from capture.claude_sessions import sync_sessions
+from capture.git_commits import sync_commits
 from capture.idle_detector import is_user_idle
 from storage.database import Database
 from storage.models import WindowEvent, Screenshot
@@ -165,7 +166,8 @@ class CaptureDaemon:
         self._ocr_pool.submit(self._process_screen_text_backlog)
 
     def _maybe_sync_sources(self):
-        if not self.settings.sources.claude_code or self._sources_running.is_set():
+        sources = self.settings.sources
+        if not (sources.claude_code or sources.git_commits) or self._sources_running.is_set():
             return
         if time.time() - self._last_sources_sync < SOURCES_SYNC_INTERVAL:
             return
@@ -175,16 +177,24 @@ class CaptureDaemon:
 
     def _sync_sources(self):
         """Runs on the sources worker."""
+        sources, retention = self.settings.sources, self.settings.privacy.event_retention_days
         try:
-            saved = sync_sessions(
-                self.db, self.settings.sources.resolved_claude_code_dir,
-                retention_days=self.settings.privacy.event_retention_days,
-                should_stop=lambda: not self.running,
-            )
-            if saved:
-                log.info(f"Synced {saved} Claude Code session(s)")
-        except Exception as e:
-            log.warning(f"Claude Code session sync failed: {e}")
+            if sources.claude_code:
+                try:
+                    saved = sync_sessions(self.db, sources.resolved_claude_code_dir, retention_days=retention,
+                                          should_stop=lambda: not self.running)
+                    if saved:
+                        log.info(f"Synced {saved} Claude Code session(s)")
+                except Exception as e:
+                    log.warning(f"Claude Code session sync failed: {e}")
+            # After sessions: their folders are the repos to read.
+            if sources.git_commits:
+                try:
+                    saved = sync_commits(self.db, retention_days=retention, should_stop=lambda: not self.running)
+                    if saved:
+                        log.info(f"Synced {saved} git commit(s)")
+                except Exception as e:
+                    log.warning(f"Git commit sync failed: {e}")
         finally:
             self._sources_running.clear()
 
