@@ -7,6 +7,7 @@ missing reflection or wiki update for that day.
 """
 
 import http.client
+import json
 import socket
 import time
 import urllib.error
@@ -24,6 +25,19 @@ RETRYABLE_STREAM_ERRORS = {"overloaded_error", "api_error", "rate_limit_error"}
 
 class RetryableStreamError(Exception):
     """An `error` event mid-stream that's worth another attempt (e.g. overloaded)."""
+
+
+class ApiError(Exception):
+    """The API refused the request. The message is the API's own reason
+    ("Your credit balance is too low..."), not just "400 Bad Request"."""
+
+
+def _api_error(e: urllib.error.HTTPError) -> Exception:
+    try:
+        message = json.loads(e.read().decode("utf-8", "replace"))["error"]["message"]
+    except Exception:
+        return e
+    return ApiError(f"HTTP {e.code}: {message}")
 
 
 def _is_retryable(e: Exception) -> bool:
@@ -55,6 +69,8 @@ def call_with_retries(fn: Callable[[], T], label: str) -> T:
             return fn()
         except Exception as e:
             if delay is None or not _is_retryable(e):
+                if isinstance(e, urllib.error.HTTPError):
+                    raise _api_error(e) from e
                 raise
             wait = _delay_for(e, delay)
             print(f"[Retra] {label} attempt {attempt} failed ({e}); retrying in {wait}s")
