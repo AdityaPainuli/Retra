@@ -157,3 +157,40 @@ def test_session_search_also_shows_matching_commits(stored):
     out = call(stored, "search_coding_sessions", query="named folder")
     assert [c["subject"][-5:] for c in out["commits"]] == ["(#14)"]
     assert "commits" not in call(stored, "search_coding_sessions", query="named folder", offset=1)
+
+
+def test_a_fetched_commit_older_than_stored_ones_is_still_read(repo, tmp_path, monkeypatch):
+    db = Database(tmp_path / "r.db")
+    monkeypatch.setattr(git_commits, "known_repos", lambda db: [repo])
+    (repo / "new.txt").write_text("n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "Monday work", when=datetime.now().isoformat())
+    assert git_commits.sync_commits(db) == 2
+    # A branch fetched later whose commit is days older than the newest stored one.
+    git(repo, "checkout", "-q", "-b", "old-pr", "HEAD~1")
+    (repo / "old.txt").write_text("o")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "Friday squash merge (#20)",
+        when=(datetime.now() - timedelta(days=4)).isoformat())
+    assert git_commits.sync_commits(db) == 1
+
+
+def test_repo_without_a_git_identity_is_skipped(tmp_path, monkeypatch):
+    repo = tmp_path / "cloned"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    (repo / "a").write_text("a")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "Someone's commit")
+    monkeypatch.setattr(git_commits, "_git_user", lambda root: set())
+    assert git_commits.read_commits(repo, datetime.now() - timedelta(days=5)) == []
+
+
+def test_retention_cleanup_removes_old_commits_and_their_search_entries(repo, tmp_path):
+    db = Database(tmp_path / "r.db")
+    old = git_commits.read_commits(repo, datetime.now() - timedelta(days=5))
+    db.save_commits([dict(c, committed_at=(datetime.now() - timedelta(days=40)).isoformat()) for c in old])
+    db.cleanup_old_data(event_retention_days=30)
+    with db._conn() as c:
+        assert c.execute("SELECT COUNT(*) FROM git_commits").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM git_commits_fts WHERE git_commits_fts MATCH 'folder'").fetchone()[0] == 0

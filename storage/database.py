@@ -758,12 +758,6 @@ class Database:
 
     # ── Git commits ───────────────────────────────────────────────
 
-    def get_commit_sync_state(self) -> dict[str, str]:
-        """{repo_path: newest committed_at stored}."""
-        with self._conn() as conn:
-            rows = conn.execute("SELECT repo_path, MAX(committed_at) FROM git_commits GROUP BY repo_path").fetchall()
-        return {r[0]: r[1] for r in rows}
-
     def save_commits(self, commits: list[dict]) -> int:
         """Insert commits not stored yet. Returns how many were new."""
         if not commits:
@@ -1118,7 +1112,7 @@ class Database:
 
     def cleanup_old_data(self, event_retention_days: int = 0) -> list[str]:
         """Delete activity older than its retention period. 0 means keep forever.
-        Screenshot rows (screen text) and agent sessions count as activity. Returns the image
+        Screenshot rows (screen text), agent sessions and git commits count as activity. Returns the image
         paths of deleted screenshot rows that still had one, for the caller
         to delete (usually none: images are purged much sooner)."""
         with self._conn() as conn:
@@ -1135,4 +1129,6 @@ class Database:
             conn.execute("""DELETE FROM agent_messages WHERE session_id IN
                 (SELECT session_id FROM agent_sessions WHERE ended_at < ?)""", (cutoff,))
             conn.execute("DELETE FROM agent_sessions WHERE ended_at < ?", (cutoff,))
+            # Its delete trigger drops the commits' search entries too.
+            conn.execute("DELETE FROM git_commits WHERE committed_at < ?", (cutoff,))
         return images

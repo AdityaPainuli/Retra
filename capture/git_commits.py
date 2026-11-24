@@ -9,8 +9,8 @@ of the user's commits (authored with the repo's git user.email or
 user.name; a cloned open-source repo would otherwise bring thousands of other
 people's): time,
 author, subject and body. Secrets are masked before anything
-is stored. Only commits newer than the last sync (or the retention window)
-are read.
+is stored. Each sync reads the whole retention window: a fetch can bring
+commits older than ones already stored, and inserts skip what's there.
 """
 
 import logging
@@ -67,8 +67,11 @@ def _git_user(root: Path) -> set[str]:
 
 def read_commits(root: Path, since: datetime) -> list[dict]:
     """The user's commits on any branch of `root` committed after `since`,
-    newest first. With no git user configured, everyone's."""
+    newest first. None when the repo has no git user configured: there's no
+    telling the user's commits from anyone else's."""
     me = _git_user(root)
+    if not me:
+        return []
     out = subprocess.run(
         ["git", "-C", str(root), "log", "--all", f"--since={since.isoformat()}", f"--format={_FORMAT}"],
         capture_output=True, text=True, timeout=GIT_TIMEOUT, errors="replace",
@@ -82,7 +85,7 @@ def read_commits(root: Path, since: datetime) -> list[dict]:
         if len(parts) != 7:
             continue
         sha, committed, authored, author, email, subject, body = parts
-        if me and not {email.lower(), author.lower()} & me:
+        if not {email.lower(), author.lower()} & me:
             continue
         commits.append({
             "repo_path": str(root), "sha": sha, "project": project, "repo": repo,
@@ -94,17 +97,13 @@ def read_commits(root: Path, since: datetime) -> list[dict]:
 
 
 def sync_commits(db, retention_days: int = 0, should_stop: Callable[[], bool] = lambda: False) -> int:
-    """Store commits new since each repo's last sync. Returns how many."""
+    """Store the retention window's commits not stored yet. Returns how many."""
     days = retention_days if retention_days > 0 else DEFAULT_DAYS
-    floor = datetime.now() - timedelta(days=days)
-    latest = db.get_commit_sync_state()
+    since = datetime.now() - timedelta(days=days)
     saved = 0
     for root in known_repos(db):
         if should_stop():
             break
-        # A day of overlap: a rebase or a late push can land older commit times.
-        since = max(floor, datetime.fromisoformat(latest[str(root)]) - timedelta(days=1)) \
-            if str(root) in latest else floor
         try:
             commits = read_commits(root, since)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
