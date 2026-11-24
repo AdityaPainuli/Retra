@@ -221,6 +221,39 @@ class ReadOnlyDatabase(Database):
             """, (session_id, limit)).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def get_agent_turns(self, session_id: str, start: Optional[datetime], end: datetime) -> list[dict]:
+        """The session's prompts and recaps in [start, end), oldest first."""
+        sql = "SELECT timestamp, kind, text FROM agent_messages WHERE session_id = ? AND timestamp < ?"
+        params: list = [session_id, end.isoformat()]
+        if start is not None:
+            sql += " AND timestamp >= ?"
+            params.append(start.isoformat())
+        with self._conn() as conn:
+            rows = conn.execute(sql + " ORDER BY timestamp, id", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_commits(self, start: datetime, end: datetime, limit: int, project: Optional[str] = None,
+                    match: Optional[str] = None) -> list[dict]:
+        """Commits in [start, end), newest first, or best match first when
+        `match` (an FTS5 query) is given. `project` matches a substring of the
+        project, the repo's code-host name or the repo's folder."""
+        sql = "SELECT c.* FROM git_commits c"
+        params: list = []
+        if match:
+            sql += " JOIN git_commits_fts f ON f.rowid = c.rowid AND git_commits_fts MATCH ?"
+            params.append(match)
+        sql += " WHERE c.committed_at >= ? AND c.committed_at < ?"
+        params += [start.isoformat(), end.isoformat()]
+        if project:
+            like = "%" + project.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            sql += " AND (" + " OR ".join(f"lower(coalesce(c.{f}, '')) LIKE ? ESCAPE '\\'"
+                                          for f in ("project", "repo", "repo_path")) + ")"
+            params += [like] * 3
+        sql += " ORDER BY " + ("bm25(git_commits_fts), " if match else "") + "c.committed_at DESC LIMIT ?"
+        with self._conn() as conn:
+            rows = conn.execute(sql, (*params, limit)).fetchall()
+        return [dict(r) for r in rows]
+
     def search_agent_messages(self, match: str, start: datetime, end: datetime,
                               limit: int) -> list[dict]:
         """Full-text search over session prompts and recaps, best first."""

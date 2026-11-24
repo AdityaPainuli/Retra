@@ -1,6 +1,13 @@
 {
   "coding_sessions": {
     "params": {
+      "as_of": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
+      },
       "days": {
         "type": "integer",
         "default": 7
@@ -14,6 +21,51 @@
         "default": 0
       },
       "project": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
+      }
+    },
+    "required": [],
+    "annotations": {
+      "read_only_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "commits": {
+    "params": {
+      "limit": {
+        "type": "integer",
+        "default": 15
+      },
+      "offset": {
+        "type": "integer",
+        "default": 0
+      },
+      "project": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
+      },
+      "query": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
+      },
+      "since": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
+      },
+      "until": {
         "type": [
           "string",
           "null"

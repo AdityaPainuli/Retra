@@ -43,17 +43,21 @@ mcp = MCPServer(
         "compiled from daily activity. Call get_status first to see whether capture is "
         "recording and how fresh each source is. Use current_activity for 'what am I doing "
         "now', recent_work or list_projects for 'what have I been working on', "
-        "coding_sessions for where recent Claude Code sessions stopped, day_summary "
-        "for one day, search_activity to find when something was worked on, "
+        "coding_sessions for where recent Claude Code sessions stopped (as_of for where they "
+        "stood on a past day), day_summary for one day (including that day's coding sessions), search_activity to find when something was worked on, "
         "search_screen_text to find what was on screen, search_coding_sessions to "
-        "find past sessions by what was asked or done, search_wiki to find decisions "
+        "find past sessions by what was asked, answered or done, commits for what shipped "
+        "and why (PR descriptions included; the final word on a decision), search_wiki to find decisions "
         "and history in the long-term notes, wiki_page to read a note or some of its sections, "
         "and facts for what the wiki holds true about a project or topic, "
         "when it became true and what it replaced (as_of for a past day).\n\n"
         "How to use it: start broad (recent_work, coding_sessions), then search, then "
         "fetch detail (day_summary, wiki_page with sections). Wiki facts may carry "
         "a confidence label: say 'unconfirmed' for #watchlist facts and give both sides of "
-        "#contested ones. Cite the dates and times from results "
+        "#contested ones. Sessions run for weeks and plans change between turns: check the later "
+        "recaps and the commits before reporting a decision or where something stopped. Answer short: "
+        "lead with the answer in a few lines, then only the details asked for. "
+        "Cite the dates and times from results "
         "instead of saying 'recently'. List results carry has_more and next_offset: "
         "when has_more is true, call again with offset=next_offset before concluding. "
         "An empty result means no match in that range: "
@@ -198,12 +202,56 @@ def recent_work(days: int = 1, project: Optional[str] = None) -> dict:
     }
 
 
-@tool("activity", "ai_summary")
+def _day_coding(d: date) -> list[dict]:
+    """Claude Code sessions with turns on `d`: what each did that day and,
+    in `last_recap`, where it stood at the day's end."""
+    start, end = _start_of(d), _start_of(d + timedelta(days=1))
+    try:
+        rows = get_db().get_agent_sessions(start, end, MAX_RESULTS)
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for r in rows:
+        if session_is_private(r):
+            continue
+        turns = get_db().get_agent_turns(r["session_id"], start, end)
+        if not turns:
+            continue
+        recaps = [t for t in turns if t["kind"] == "recap"]
+        replies = [t for t in turns if t["kind"] == "reply"]
+        out.append({
+            "title": r["title"], "project": r["project"], "repo": r.get("repo"), "branch": r["branch"],
+            "first_turn": turns[0]["timestamp"][11:16], "last_turn": turns[-1]["timestamp"][11:16],
+            "prompts": sum(t["kind"] == "prompt" for t in turns),
+            "earlier_recaps": [{"at": t["timestamp"][11:16], "text": redact_text(short(t["text"], 300))}
+                               for t in recaps[-4:-1]],
+            "last_recap": ({"at": recaps[-1]["timestamp"][11:16], "text": redact_text(recaps[-1]["text"])}
+                           if recaps else None),
+            "last_reply": redact_text(short(replies[-1]["text"], 800)) if replies else None,
+        })
+    out.sort(key=lambda s: s["last_turn"], reverse=True)
+    return out[:15]
+
+
+def _day_commits(d: date) -> list[dict]:
+    try:
+        rows = get_db().get_commits(_start_of(d), _start_of(d + timedelta(days=1)), MAX_RESULTS)
+    except sqlite3.OperationalError:
+        return []
+    return [{"at": c["committed_at"][11:16], "project": c["project"], "sha": c["sha"][:8],
+             "author": c["author"], "subject": redact_text(c["subject"])}
+            for c in _unique_commits(rows)][:25]
+
+
+@tool("activity", "ai_summary", "coding_sessions", "commits")
 def day_summary(day: str = "today") -> dict:
     """One day (YYYY-MM-DD, 'today' or 'yesterday'): focus score, category
-    minutes, projects, top titles, a timeline of blocks of 5+ minutes, and the
-    saved AI reflection if one exists. Stats and timeline are computed live;
-    the reflection is a snapshot from when it was written."""
+    minutes, projects, top titles, a timeline of blocks of 5+ minutes, the
+    Claude Code sessions with turns that day (each one's last recap that day
+    is where it stood at the day's end), the git commits made that day
+    (subjects; read bodies with `commits`), and the saved AI reflection if one
+    exists. Stats, timeline and sessions are computed live; the reflection is
+    a snapshot from when it was written."""
     d = parse_day(day)
     summary = get_db().compute_daily_summary(d)
     spans = load_spans(_start_of(d), _start_of(d + timedelta(days=1)))
@@ -236,6 +284,8 @@ def day_summary(day: str = "today") -> dict:
         "apps": app_breakdown(spans, 10),
         "titles": title_breakdown(spans, 12),
         "timeline": timeline(spans),
+        "coding_sessions": _day_coding(d),
+        "commits": _day_commits(d),
         "ai_summary": redact_text(summary.ai_summary),
         "ai_summary_written_at": f"{written:%Y-%m-%d %H:%M}" if summary.ai_summary and written else None,
         "ai_summary_stats": then,
@@ -391,24 +441,85 @@ def _relative(path: str, root: Optional[str]) -> str:
     return path.removeprefix(root.rstrip("/") + "/") if root and path.startswith(root) else path
 
 
+def _hm(stamp: Optional[str]) -> str:
+    return (stamp or "")[:16].replace("T", " ")
+
+
+def _as_of(value: str) -> datetime:
+    """The moment `as_of` names: the end of a day for a date, 'today' or
+    'yesterday', else the datetime itself."""
+    v = value.strip().lower()
+    when = parse_when(value, datetime.now())
+    return when + timedelta(days=1) if len(v) == 10 or v in ("today", "yesterday") else when
+
+
+def _session_then(r: dict, start: datetime, cutoff: datetime) -> Optional[dict]:
+    """A session as it stood at `cutoff`: its last recap, prompts and time
+    before then. None if it had no turn in [start, cutoff)."""
+    turns = get_db().get_agent_turns(r["session_id"], None, cutoff)
+    if not turns or turns[-1]["timestamp"] < start.isoformat():
+        return None
+    recaps = [t for t in turns if t["kind"] == "recap"]
+    prompts = [t for t in turns if t["kind"] == "prompt"]
+    replies = [t for t in turns if t["kind"] == "reply"]
+    return {
+        "title": r["title"],
+        "project": r["project"],
+        "repo": r.get("repo"),
+        "folder": r["cwd"],
+        "branch": r["branch"],
+        "started": _hm(r["started_at"]),
+        "last_active": _hm(turns[-1]["timestamp"]),
+        "prompts": len(prompts),
+        "status": redact_text(recaps[-1]["text"]) if recaps else None,
+        "status_at": _hm(recaps[-1]["timestamp"]) if recaps else None,
+        "last_reply": redact_text(short(replies[-1]["text"], 800)) if replies else None,
+        "recent_prompts": [{"at": _hm(p["timestamp"]), "text": redact_text(short(p["text"], 300))}
+                           for p in prompts[-5:]],
+    }
+
+
 @tool("coding_sessions")
-def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5, offset: int = 0) -> dict:
+def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5, offset: int = 0,
+                    as_of: Optional[str] = None) -> dict:
     """Recent Claude Code sessions, newest first: title, project, folder,
     branch, when, how many prompts, the latest turn recap (where it stopped),
     the last few prompts, files edited and PRs opened. Use for 'where did I
     leave off on X'. `project` filters by case-insensitive substring of the
     project name, folder, or `repo` (the repo's code-host name when it
-    differs from the folder name); `days` max 60. When `has_more` is true, call
-    again with offset=`next_offset`."""
+    differs from the folder name); `days` max 60. `as_of` (YYYY-MM-DD,
+    'yesterday' or an ISO datetime) shows each session as it stood then (a
+    date means the end of that day): its last recap, prompts and activity
+    before that moment, over the `days` before it. A session can run for
+    weeks, so use as_of for 'where did I leave off on <day>'. When
+    `has_more` is true, call again with offset=`next_offset`."""
     days = max(1, min(days, 60))
     limit = max(1, min(limit, 25))
-    start, end = _session_range(None, None, days)
+    if as_of:
+        try:
+            end = _as_of(as_of)
+        except ValueError:
+            return {"error": f"as_of must be YYYY-MM-DD, 'yesterday' or an ISO datetime, not {as_of!r}"}
+        start = _start_of((end - timedelta(seconds=1)).date() - timedelta(days=days - 1))
+    else:
+        start, end = _session_range(None, None, days)
     try:
         rows = get_db().get_agent_sessions(start, end, MAX_RESULTS, project)
     except sqlite3.OperationalError:
         return {"error": "coding sessions aren't available yet (capture daemon hasn't run the upgrade)"}
-    rows, paging = page([r for r in rows if not session_is_private(r)], offset, limit)
+    rows = [r for r in rows if not session_is_private(r)]
 
+    if as_of:
+        then = [s for s in (_session_then(r, start, end) for r in rows) if s]
+        then.sort(key=lambda s: s["last_active"], reverse=True)
+        sessions, paging = page(then, offset, limit)
+        return {"range": f"{start.date().isoformat()} to {(end - timedelta(seconds=1)).date().isoformat()}",
+                "as_of": as_of if len(as_of.strip()) > 10 else f"end of {(end - timedelta(seconds=1)).date().isoformat()}",
+                "project_filter": project, "sessions": sessions,
+                "note": "Each session as it stood at as_of. Files edited and PRs opened cover the "
+                        "whole session, so they're left out.", **paging}
+
+    rows, paging = page(rows, offset, limit)
     sessions = []
     for r in rows:
         prompts = get_db().get_agent_prompts(r["session_id"], 5)
@@ -435,25 +546,41 @@ def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5
             "project_filter": project, "sessions": sessions, **paging}
 
 
-@tool("coding_sessions")
+@tool("coding_sessions", "commits")
 def search_coding_sessions(query: str, since: Optional[str] = None, until: Optional[str] = None,
                            limit: int = 15, offset: int = 0) -> dict:
-    """Search what was asked in Claude Code sessions (prompts) and how turns
-    ended (recaps). All words must appear; `since`/`until` work like
+    """Search what was asked in Claude Code sessions (prompts), how turns
+    ended (recaps) and what the assistant answered (replies). All words must appear, as whole words or prefixes
+    ('name' finds 'naming'); `since`/`until` work like
     search_activity (default last 90 days). Best matches first; [brackets]
-    mark the matched words. Use coding_sessions(project=...) for the full
-    picture of a session found here. When `has_more` is true, call again
-    with offset=`next_offset`."""
+    mark the matched words. The first page also lists up to 3 git commits
+    matching the same words in `commits`: what actually shipped, which
+    overrides a plan discussed in the turns. Use coding_sessions(project=...)
+    for the full picture of a session found here. When `has_more` is true,
+    call again with offset=`next_offset`."""
     words = re.findall(r"\w+", query)
     if not words:
         return {"error": "query is empty"}
     limit = max(1, min(limit, 40))
     start, end = _session_range(since, until, 90)
-    match = " ".join(f'"{w}"' for w in words)
+    # Prefixes count, like search_activity: "name" should find "names" and
+    # "naming". Words under 3 characters match whole, or they'd match too much.
+    match = " ".join(f'"{w}"*' if len(w) >= 3 else f'"{w}"' for w in words)
     try:
         rows, paging = page(get_db().search_agent_messages(match, start, end, MAX_RESULTS), offset, limit)
     except sqlite3.OperationalError:
         return {"error": "coding sessions aren't available yet (capture daemon hasn't run the upgrade)"}
+    related = []
+    if offset == 0:
+        try:
+            related = [
+                {"at": _hm(c["committed_at"]), "project": c["project"], "sha": c["sha"][:8],
+                 "subject": redact_text(c["subject"]),
+                 "body": redact_text(short(c["body"], 500)) if c["body"] else None}
+                for c in _unique_commits(get_db().get_commits(start, end, 10, None, match))[:3]
+            ]
+        except sqlite3.OperationalError:
+            pass  # no commits table yet
 
     return {
         "query": query,
@@ -470,8 +597,61 @@ def search_coding_sessions(query: str, since: Optional[str] = None, until: Optio
             }
             for r in rows
         ],
+        **({"commits": related} if related else {}),
         **paging,
     }
+
+
+_PR_RE = re.compile(r"\(#(\d+)\)\s*$")
+
+
+def _unique_commits(rows: list[dict]) -> list[dict]:
+    """Visible commits, each once: worktrees and clones of one repo hold the
+    same commits."""
+    seen: set[str] = set()
+    return [c for c in rows if not _commit_private(c) and not (c["sha"] in seen or seen.add(c["sha"]))]
+
+
+def _commit_private(c: dict) -> bool:
+    hay = " ".join(str(c.get(k) or "") for k in ("repo_path", "project", "repo"))
+    return redact_text(hay) != hay
+
+
+@tool("commits")
+def commits(query: Optional[str] = None, project: Optional[str] = None, since: Optional[str] = None,
+            until: Optional[str] = None, limit: int = 15, offset: int = 0) -> dict:
+    """Git commits from the user's local repos, on any branch: what shipped
+    and why. A squash-merged PR's commit carries its PR number and the PR
+    description as `body`, so this is where final decisions are written
+    down. Newest first; with `query`, best match first (every word must
+    appear in the subject or body; prefixes count). `project` matches the
+    project (folder), the repo's code-host name or its path. `since`/`until`
+    work like search_activity (default last 30 days). When `has_more` is
+    true, call again with offset=`next_offset`."""
+    limit = max(1, min(limit, 40))
+    start, end = _session_range(since, until, 30)
+    match = None
+    if query:
+        words = re.findall(r"\w+", query)
+        if not words:
+            return {"error": "query is empty"}
+        match = " ".join(f'"{w}"*' if len(w) >= 3 else f'"{w}"' for w in words)
+    try:
+        rows = get_db().get_commits(start, end, MAX_RESULTS, project, match)
+    except sqlite3.OperationalError:
+        return {"error": "commits aren't available yet (capture daemon hasn't run the upgrade)"}
+    rows, paging = page(_unique_commits(rows), offset, limit)
+    out = []
+    for c in rows:
+        pr = _PR_RE.search(c["subject"])
+        out.append({
+            "at": _hm(c["committed_at"]), "project": c["project"], "repo": c["repo"],
+            "sha": c["sha"][:8], "author": c["author"], "subject": redact_text(c["subject"]),
+            "pr": int(pr.group(1)) if pr else None,
+            "body": redact_text(short(c["body"], 1200)) if c["body"] else None,
+        })
+    return {"range": f"{start.date().isoformat()} to {(end - timedelta(seconds=1)).date().isoformat()}",
+            "query": query, "project_filter": project, "commits": out, **paging}
 
 
 @tool("activity")

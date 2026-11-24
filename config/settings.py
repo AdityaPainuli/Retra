@@ -259,6 +259,9 @@ class SourcesConfig:
     # Claude Code session logs: what was asked, decided and changed per project.
     claude_code: bool = True
     claude_code_dir: str = "~/.claude/projects"
+    # Commits of local git repos: what shipped and why (squash-merged PRs
+    # carry their description). Read with `git log`, never pushed anywhere.
+    git_commits: bool = True
 
     @property
     def resolved_claude_code_dir(self) -> Path:

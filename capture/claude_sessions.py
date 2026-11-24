@@ -4,8 +4,9 @@ Claude Code sessions as a source.
 Claude Code keeps one JSONL log per session under ~/.claude/projects/<dir>/.
 For each session this keeps what an agent needs to pick the work back up:
 where it ran (cwd, project, branch), its title, what was asked, the turn
-recaps, files edited and PRs opened (via `gh pr create`). Secrets are masked before anything is
-stored. Logs are only re-read when their size or mtime changes.
+recaps, each turn's final reply, files edited and PRs opened (via `gh pr create`). Secrets are
+masked before anything is stored. Logs are only re-read when their size or mtime changes, or
+when PARSE_VERSION does.
 """
 
 import json
@@ -25,6 +26,9 @@ log = logging.getLogger("retra")
 MAX_PROMPT_CHARS = 2000
 MAX_REPLY_CHARS = 1500
 MAX_FILES = 50
+# Bump when parse_session starts keeping something new, so stored sessions
+# are re-read once. 2: each turn's final reply.
+PARSE_VERSION = 2
 
 _EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 _RECAP_TOOL = "mcp__ccd_turn__wrap_up"
@@ -167,7 +171,7 @@ def _result_text(content) -> str:
 def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]]]:
     """Read one session log. Returns (session row, messages) or None when the
     session has no prompts (e.g. opened and closed)."""
-    cwd = branch = title = last_reply = last_status = None
+    cwd = branch = title = last_reply = last_reply_ts = last_status = None
     started = ended = None
     files: dict[str, str] = {}
     prs: list[str] = []
@@ -210,6 +214,9 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
                     continue
                 text = _prompt_text(content)
                 if text:
+                    if last_reply:
+                        # The previous turn's answer: where decisions and next steps are said.
+                        messages.append((last_reply_ts, "reply", redact(last_reply)[:MAX_REPLY_CHARS]))
                     prompt_count += 1
                     messages.append((ts, "prompt", redact(text)[:MAX_PROMPT_CHARS]))
                     # The stopping point is the latest turn's; older recaps stay in messages.
@@ -220,7 +227,7 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "text" and block.get("text", "").strip():
-                    last_reply = block["text"].strip()
+                    last_reply, last_reply_ts = block["text"].strip(), ts
                 elif block.get("type") == "tool_use":
                     name, args = block.get("name"), block.get("input") or {}
                     if (name in _EDIT_TOOLS and args.get("file_path")
@@ -240,6 +247,8 @@ def parse_session(path: Path) -> Optional[tuple[dict, list[tuple[str, str, str]]
 
     if not prompt_count:
         return None
+    if last_reply:
+        messages.append((last_reply_ts, "reply", redact(last_reply)[:MAX_REPLY_CHARS]))
 
     repo = _repo_dir(cwd) if cwd else None
     session = {
@@ -287,7 +296,7 @@ def sync_sessions(db, logs_dir: Path, retention_days: int = 0,
             stat = path.stat()
         except OSError:
             continue
-        if known.get(str(path)) == (stat.st_size, stat.st_mtime):
+        if known.get(str(path)) == (stat.st_size, stat.st_mtime, PARSE_VERSION):
             continue
         if cutoff and datetime.fromtimestamp(stat.st_mtime) < cutoff:
             continue
@@ -302,7 +311,8 @@ def sync_sessions(db, logs_dir: Path, retention_days: int = 0,
         # mtime can be recent for an old session (copied log, renamed title).
         if cutoff and session["ended_at"] and datetime.fromisoformat(session["ended_at"]) < cutoff:
             continue
-        session.update(log_path=str(path), log_size=stat.st_size, log_mtime=stat.st_mtime)
+        session.update(log_path=str(path), log_size=stat.st_size, log_mtime=stat.st_mtime,
+                       parse_version=PARSE_VERSION)
         db.save_agent_session(session, messages)
         saved += 1
     refresh_session_names(db)
