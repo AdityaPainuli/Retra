@@ -47,3 +47,12 @@ def test_reply_stands_in_when_a_day_has_no_recap(retra):
     save(db, "chat", [(f"{D}T11:00:00", "prompt", "what's next?"),
                       (f"{D}T11:01:00", "reply", "Next: D3 wiki search.")], f"{D}T11:01:00")
     assert "Where it stopped: Next: D3 wiki search." in records(D)["retra://session/chat"]
+
+
+def test_a_blocked_word_past_the_cut_still_hides_its_line(retra):
+    db = Database(os.environ["RETRA_DB_PATH"])
+    secret = "x" * 650 + " my bank login"
+    save(db, "late", [(f"{D}T12:00:00", "prompt", "s" * 350 + " my bank pin"),
+                      (f"{D}T12:05:00", "recap", secret)], f"{D}T12:05:00")
+    text = records(D)["retra://session/late"]
+    assert "sss" not in text and "xxx" not in text and "hidden by privacy settings" in text

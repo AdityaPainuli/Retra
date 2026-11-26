@@ -103,12 +103,12 @@ def _session_records(db, start: datetime, end: datetime) -> list[Record]:
         day_prompts = [t for t in turns if t["kind"] == "prompt"]
         parts = [f'Claude Code session "{redact_text(r["title"]) or "(untitled)"}" ({where}), '
                  f'{_when(turns[0]["timestamp"])} to {_when(turns[-1]["timestamp"])}, {len(day_prompts)} prompts.']
-        prompts = [redact_text(short(p["text"], 300)) for p in day_prompts[-SESSION_PROMPTS:]]
+        prompts = [short(redact_text(p["text"]), 300) for p in day_prompts[-SESSION_PROMPTS:]]
         if prompts := [p for p in prompts if p]:
             parts.append("Prompts: " + " | ".join(prompts))
         last = next((t for t in reversed(turns) if t["kind"] == "recap"), None) \
             or next((t for t in reversed(turns) if t["kind"] == "reply"), None)
-        if last and (status := redact_text(short(last["text"], 600))):
+        if last and (status := short(redact_text(last["text"]), 600)):
             parts.append(f"Where it stopped: {status}")
         # Files and PRs cover the whole session: only a session that ended
         # within the range can't bring in later work.
