@@ -104,3 +104,15 @@ def test_session_search_matches_word_prefixes(history):
              call(history, "search_coding_sessions", query="nam fix")["hits"]]
     assert "Yes, fix names" in texts and "PR 14 is open with the naming fix." in texts
     assert call(history, "search_coding_sessions", query="PR 1")["hits"] == [], "short words match whole"
+
+
+def test_a_blocked_word_past_the_cut_still_hides_its_line(history):
+    db = Database(os.environ["RETRA_DB_PATH"])
+    db.save_agent_session({
+        "session_id": "late", "source": "claude-code", "cwd": "/work/notes", "project": "notes", "repo": None,
+        "branch": "main", "title": "Notes", "started_at": at(D, "15:00"), "ended_at": at(D, "15:05"),
+        "prompt_count": 1, "files": "[]", "prs": "[]", "last_status": "done", "last_reply": None,
+        "log_path": "/late.jsonl", "log_size": 1, "log_mtime": 1.0,
+    }, [(at(D, "15:00"), "prompt", "p" * 350 + " my bank pin"), (at(D, "15:01"), "reply", "r" * 900 + " bank")])
+    [s] = call(history, "coding_sessions", project="notes", as_of=D.isoformat())["sessions"]
+    assert "ppp" not in s["recent_prompts"][0]["text"] and "rrr" not in s["last_reply"]

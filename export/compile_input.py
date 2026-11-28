@@ -85,27 +85,39 @@ def _when(stamp: str | None) -> str:
 
 
 def _session_records(db, start: datetime, end: datetime) -> list[Record]:
+    """Each coding session with turns in [start, end), as it was then: that
+    day's prompts and where it stood at the day's end. A session can run for
+    weeks; its latest state would hand an old day a later decision."""
     try:
         rows = db.get_agent_sessions(start, end, MAX_RESULTS)
     except sqlite3.OperationalError:
         return []  # the daemon hasn't created the table yet
     out = []
     for r in sorted((r for r in rows if not session_is_private(r)), key=lambda r: (r["started_at"] or "", r["session_id"])):
+        turns = db.get_agent_turns(r["session_id"], start, end)
+        if not turns:
+            continue
         names = list(dict.fromkeys(n.lower() for n in (r.get("repo"), r["project"]) if n))
         where = ", ".join(f"{k} {v}" for k, v in (("project", r["project"]), ("repo", r.get("repo")),
                                                    ("branch", r["branch"]), ("folder", r["cwd"])) if v)
+        day_prompts = [t for t in turns if t["kind"] == "prompt"]
         parts = [f'Claude Code session "{redact_text(r["title"]) or "(untitled)"}" ({where}), '
-                 f'{_when(r["started_at"])} to {_when(r["ended_at"])}, {r["prompt_count"] or 0} prompts.']
-        prompts = [redact_text(short(p["text"], 300)) for p in db.get_agent_prompts(r["session_id"], SESSION_PROMPTS)]
+                 f'{_when(turns[0]["timestamp"])} to {_when(turns[-1]["timestamp"])}, {len(day_prompts)} prompts.']
+        prompts = [short(redact_text(p["text"]), 300) for p in day_prompts[-SESSION_PROMPTS:]]
         if prompts := [p for p in prompts if p]:
             parts.append("Prompts: " + " | ".join(prompts))
-        if status := redact_text(r["last_status"] or short(r["last_reply"], 600)):
+        last = next((t for t in reversed(turns) if t["kind"] == "recap"), None) \
+            or next((t for t in reversed(turns) if t["kind"] == "reply"), None)
+        if last and (status := short(redact_text(last["text"]), 600)):
             parts.append(f"Where it stopped: {status}")
-        files = [_relative(f, r["cwd"]) for f in json.loads(r["files"] or "[]")[:10]]
-        if files:
-            parts.append("Files: " + ", ".join(files))
-        if prs := json.loads(r["prs"] or "[]"):
-            parts.append("PRs: " + ", ".join(map(str, prs)))
+        # Files and PRs cover the whole session: only a session that ended
+        # within the range can't bring in later work.
+        if (r["ended_at"] or "") < end.isoformat():
+            files = [_relative(f, r["cwd"]) for f in json.loads(r["files"] or "[]")[:10]]
+            if files:
+                parts.append("Files: " + ", ".join(files))
+            if prs := json.loads(r["prs"] or "[]"):
+                parts.append("PRs: " + ", ".join(map(str, prs)))
         out.append(Record(f"retra://session/{r['session_id']}", "session", " ".join(parts), names))
     return out
 

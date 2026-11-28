@@ -223,11 +223,11 @@ def _day_coding(d: date) -> list[dict]:
             "title": r["title"], "project": r["project"], "repo": r.get("repo"), "branch": r["branch"],
             "first_turn": turns[0]["timestamp"][11:16], "last_turn": turns[-1]["timestamp"][11:16],
             "prompts": sum(t["kind"] == "prompt" for t in turns),
-            "earlier_recaps": [{"at": t["timestamp"][11:16], "text": redact_text(short(t["text"], 300))}
+            "earlier_recaps": [{"at": t["timestamp"][11:16], "text": short(redact_text(t["text"]), 300)}
                                for t in recaps[-4:-1]],
             "last_recap": ({"at": recaps[-1]["timestamp"][11:16], "text": redact_text(recaps[-1]["text"])}
                            if recaps else None),
-            "last_reply": redact_text(short(replies[-1]["text"], 800)) if replies else None,
+            "last_reply": short(redact_text(replies[-1]["text"]), 800) if replies else None,
         })
     out.sort(key=lambda s: s["last_turn"], reverse=True)
     return out[:15]
@@ -473,8 +473,8 @@ def _session_then(r: dict, start: datetime, cutoff: datetime) -> Optional[dict]:
         "prompts": len(prompts),
         "status": redact_text(recaps[-1]["text"]) if recaps else None,
         "status_at": _hm(recaps[-1]["timestamp"]) if recaps else None,
-        "last_reply": redact_text(short(replies[-1]["text"], 800)) if replies else None,
-        "recent_prompts": [{"at": _hm(p["timestamp"]), "text": redact_text(short(p["text"], 300))}
+        "last_reply": short(redact_text(replies[-1]["text"]), 800) if replies else None,
+        "recent_prompts": [{"at": _hm(p["timestamp"]), "text": short(redact_text(p["text"]), 300)}
                            for p in prompts[-5:]],
     }
 
@@ -533,9 +533,9 @@ def coding_sessions(project: Optional[str] = None, days: int = 7, limit: int = 5
             "last_active": (r["ended_at"] or "")[:16].replace("T", " "),
             "prompts": r["prompt_count"],
             "status": redact_text(r["last_status"]),
-            "last_reply": None if r["last_status"] else redact_text(short(r["last_reply"], 600)),
+            "last_reply": None if r["last_status"] else short(redact_text(r["last_reply"]), 600),
             "recent_prompts": [
-                {"at": p["timestamp"][:16].replace("T", " "), "text": redact_text(short(p["text"], 300))}
+                {"at": p["timestamp"][:16].replace("T", " "), "text": short(redact_text(p["text"]), 300)}
                 for p in prompts
             ],
             "files_edited": [_relative(f, r["cwd"]) for f in json.loads(r["files"] or "[]")[:10]],
@@ -576,7 +576,7 @@ def search_coding_sessions(query: str, since: Optional[str] = None, until: Optio
             related = [
                 {"at": _hm(c["committed_at"]), "project": c["project"], "sha": c["sha"][:8],
                  "subject": redact_text(c["subject"]),
-                 "body": redact_text(short(c["body"], 500)) if c["body"] else None}
+                 "body": short(redact_text(c["body"]), 500) if c["body"] else None}
                 for c in _unique_commits(get_db().get_commits(start, end, 10, None, match))[:3]
             ]
         except sqlite3.OperationalError:
@@ -648,7 +648,7 @@ def commits(query: Optional[str] = None, project: Optional[str] = None, since: O
             "at": _hm(c["committed_at"]), "project": c["project"], "repo": c["repo"],
             "sha": c["sha"][:8], "author": c["author"], "subject": redact_text(c["subject"]),
             "pr": int(pr.group(1)) if pr else None,
-            "body": redact_text(short(c["body"], 1200)) if c["body"] else None,
+            "body": short(redact_text(c["body"]), 1200) if c["body"] else None,
         })
     return {"range": f"{start.date().isoformat()} to {(end - timedelta(seconds=1)).date().isoformat()}",
             "query": query, "project_filter": project, "commits": out, **paging}
